@@ -5,7 +5,7 @@ import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SUFFIXES = {'.cc', '.h', '.ned', '.msg', '.md', '.ini', '.sh', '.py'}
-for name in ('CoRE4INET', 'FiCo4OMNeT', 'SignalsAndGateways'):
+for name in ('CoRE4INET', 'FiCo4OMNeT', 'SignalsAndGateways', 'SOA4CoRE'):
     repo = ROOT / 'upstream' / name
     patch = subprocess.check_output(['git', 'diff', '--binary', 'HEAD'], cwd=repo)
     untracked = subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '-z'], cwd=repo)

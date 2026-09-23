@@ -11,8 +11,11 @@ included in this Git repository.
 | `patches/FiCo4OMNeT.patch` | [CoRE-RG/FiCo4OMNeT](https://github.com/CoRE-RG/FiCo4OMNeT) | BSD 3-Clause; CoRE Research Group, Hamburg University of Applied Sciences. See `LICENSES/FiCo4OMNeT-BSD-3-Clause.txt`. Some existing individual files carry LGPL notices; preserve those file notices as well. |
 | `patches/CoRE4INET.patch` | [CoRE-RG/CoRE4INET](https://github.com/CoRE-RG/CoRE4INET) | LGPL-3.0-or-later notices in modified source; original authors and notices retained. See `LICENSES/CoRE4INET-LGPL-3.0.txt`. |
 | `patches/SignalsAndGateways.patch` | [CoRE-RG/SignalsAndGateways](https://github.com/CoRE-RG/SignalsAndGateways) | LGPL-3.0-or-later notices in modified source; original notices retained. See `LICENSES/SignalsAndGateways-LGPL-3.0.txt`. |
+| `patches/SOA4CoRE.patch` | [CoRE-RG/SOA4CoRE](https://github.com/CoRE-RG/SOA4CoRE) | LGPL-3.0; CoRE Research Group, HAW Hamburg. The INET4 port lives in `src-inet4/` (copied and modified upstream files keep their notices; new files carry LGPL notices). See `LICENSES/SOA4CoRE-LGPL-3.0.txt`. |
 | INET (fetched, unmodified) | [inet-framework/inet](https://github.com/inet-framework/inet) | LGPL; see `LICENSES/INET-LGPL-3.0.txt` and per-file notices in the fetched source. |
 | Open1722 (fetched, unmodified, test-only) | [COVESA/Open1722](https://github.com/COVESA/Open1722) | BSD 3-Clause; Intel Corporation, COVESA and contributors (see `upstream/Open1722/LICENSE`). Compiled only into the local test helper `.local/bin/open1722_decode`; not linked into or distributed with the simulation libraries. |
+
+| Scapy 2.6.1 (downloaded by the test, test-only) | [secdev/scapy](https://github.com/secdev/scapy) | GPL-2.0; installed from PyPI (hash-pinned in `tests/someiptest/requirements.txt`) into `.local/venv-someip-test` and run as a separate process to decode captured SOME/IP frames. Not linked into, copied into or distributed with this repository or the simulation libraries. |
 
 A copy of GPLv3, referenced by LGPLv3, is provided in `LICENSES/GPL-3.0.txt`.
 New source additions within the patches declare their license in their headers.

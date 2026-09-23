@@ -4,7 +4,7 @@
 
 対象は **OMNeT++ 6.4.0 / INET 4.7.0 / Linux・WSL2**。通常のセットアップは既存OMNeT++の設定・ソース・ビルド成果物を変更せず、管理者権限も使いません。INETやCoRE関連ライブラリが未導入の状態から実行できます。
 
-**対応範囲:** CAN本体の **FiCo4OMNeT** をCAN-FD対応に改修し、SignalsAndGatewaysをINET4へ接続しています。CAN/CAN-FDのEthernet転送は、独自ヘッダに加えて **IEEE 1722 AVTP**（NTSCF/TSCF + ACF CAN/CAN Brief、EtherType 0x22F0）に対応します（[詳細](docs/AVTP.md)）。CoRE4INETは既存 `BGTrafficSourceApp` の選択移植です。旧CoRE4INET全体の移植ではなく、AS6802/TTEthernet、旧AVB/SRP、旧Qbv等は未移植です。CAN-FDの時間計算はイベント単位の近似です。[詳細](docs/CORE_PORT.md)
+**対応範囲:** CAN本体の **FiCo4OMNeT** をCAN-FD対応に改修し、SignalsAndGatewaysをINET4へ接続しています。CAN/CAN-FDのEthernet転送は、独自ヘッダに加えて **IEEE 1722 AVTP**（NTSCF/TSCF + ACF CAN/CAN Brief、EtherType 0x22F0）に対応します（[詳細](docs/AVTP.md)）。サービス指向通信として、**SOA4CoREのSOME/IP・SOME/IP-SD**をINET4へ移植しています（[詳細](docs/SOMEIP.md)）。CoRE4INETは既存 `BGTrafficSourceApp` の選択移植です。旧CoRE4INET全体の移植ではなく、AS6802/TTEthernet、旧AVB/SRP、旧Qbv等は未移植です。CAN-FDの時間計算はイベント単位の近似です。[詳細](docs/CORE_PORT.md)
 
 ## Claude Codeにセットアップを依頼する
 
@@ -28,9 +28,9 @@ INETと各CoREソースの取得、パッチ適用、releaseビルド、CAN単�
 |---|---|
 | OS | Ubuntu 24.04 x86_64 / WSL2で検証。その他Linuxは未検証。Windowsネイティブ・macOSはセットアップ対象外 |
 | OMNeT++ | **6.4.0**、release共有ライブラリがビルド済み。`setenv` と `Makefile.inc` がある開発用インストール |
-| ツール | Bash、Git、GNU make、Python **3.10以上**、そのOMNeT++を構築したC++コンパイラ（g++またはclang++等）、AVTP試験用のCコンパイラ（`cc`/gcc/clang） |
+| ツール | Bash、Git、GNU make、Python **3.10以上**（`venv`モジュール付き）、そのOMNeT++を構築したC++コンパイラ（g++またはclang++等）、AVTP試験用のCコンパイラ（`cc`/gcc/clang） |
 | OMNeT++ツール | `opp_run`、`opp_makemake`、`opp_msgc`。標準サンプルが実行でき、モデルをコンパイルできる環境 |
-| 通信 | GitHubから公開ソースを取得できること。GitHubアカウントやトークンは不要 |
+| 通信 | GitHubから公開ソースを取得できること。SOME/IP試験の初回にPyPIからScapy 2.6.1（ハッシュ固定）を `.local/` のvenvへ取得。アカウントやトークンは不要 |
 | 容量・メモリ | 空きディスク目安5GB以上。並列数は既定4。メモリが少ない場合は `BUILD_JOBS=2` または1 |
 | GUI（任意） | Qtenvがビルド済みで、X11/WaylandまたはWSLgが利用可能。CLIテストにGUIは不要 |
 | パス | リポジトリとOMNeT++のパスに空白を含めないこと |
@@ -58,10 +58,10 @@ BUILD_JOBS=4 ./scripts/setup.sh 2>&1 | tee logs/setup.log
 セットアップは次の順に実行します。
 
 1. バージョン、共有ライブラリ構成、コンパイラ、必要コマンド、`opp_run` の実行を確認。
-2. `sources.lock.json` のコミットでINET、FiCo4OMNeT、CoRE4INET、SignalsAndGateways、Open1722（AVTP試験専用の参照デコーダ。シミュレーションにはリンクしない）を `upstream/` に取得。
+2. `sources.lock.json` のコミットでINET、FiCo4OMNeT、CoRE4INET、SignalsAndGateways、SOA4CoRE、Open1722（AVTP試験専用の参照デコーダ。シミュレーションにはリンクしない）を `upstream/` に取得。
 3. `patches/` の改修を適用。適用済みなら再適用せず、異なるコミットや競合する変更があれば停止。
-4. INETと3つの改修ライブラリを **MODE=release** でビルド。
-5. CAN単体の15項目、混在ネットワーク4構成、IEEE 1722 AVTPの検証（自己試験33項目・9構成（TSN・gPTPを含む）・pcap/Open1722照合・異常系4件）を実行。
+4. INETと4つの改修ライブラリを **MODE=release** でビルド。
+5. CAN単体の15項目、混在ネットワーク4構成、IEEE 1722 AVTPの検証（自己試験33項目・9構成（TSN・gPTPを含む）・pcap/Open1722照合・異常系4件）、SOME/IPの検証（自己試験19項目・4構成・pcap/Scapy照合・異常系3件）を実行。
 
 使用したOMNeT++のパスは、Git管理外の `.local/omnetpp-root` に保存します。次の端末でも起動スクリプトが参照します。`OMNETPP_ROOT` の明示指定が最優先です。
 
@@ -75,7 +75,8 @@ BUILD_JOBS=4 ./scripts/setup.sh 2>&1 | tee logs/setup.log
 ./scripts/run-mixed.sh Mixed       # CLIで100msのシミュレーション
 ./scripts/run-gui.sh Mixed         # Qtenvを開く。Runボタンで開始
 ./scripts/run-mixed.sh AvtpTscf    # IEEE 1722 TSCFでCAN/CAN-FDを転送
-make test                         # 動作確認を再実行（AVTPのみは make test-avtp）
+./scripts/run-someip.sh SomeIpTcpUdp   # SOME/IP-SDで発見・購読しSOME/IPで通知（GUI: run-someip-gui.sh）
+make test                         # 動作確認を再実行（個別は make test-avtp / make test-someip）
 ```
 
 | 設定 | 内容 |
@@ -100,6 +101,7 @@ make test                         # 動作確認を再実行（AVTPのみは mak
 - `results/mixed/verification.json`: 4構成で各ゲートウェイが20送信/20受信、各ECUが20受信。ペイロード全バイトも検証。
 - `results/mixed/<設定>/`: OMNeT++の `.sca` / `.vec`。
 - `results/avtp/report.json`: AVTP自己試験（`failed: 0`）、9構成の送受信・ワイヤ検証、異常系、TSN比較の結果。
+- `results/someip/report.json`: SOME/IP自己試験（`failed: 0`）、3構成の配送・ワイヤ検証（Scapy照合）、TSN（PCP/VLAN）、異常系の結果。`results/someip/<設定>/Node*.pcap` はSOME/IP・SOME/IP-SDの記録。
 - `results/mixed/Avtp*/gatewayA.pcap`・`gatewayB.pcap`: AVTPフレームの記録（ナノ秒精度pcap）。
 - `logs/`: 混在テストのログ。CAN単体のログは `results/canfd/`。
 
@@ -154,6 +156,7 @@ flowchart LR
 | `upstream/CoRE4INET` | 既存BGTrafficSourceAppをINET4 Packet/ChunkとEthernetSocketIoへ移植。`Makefile.inet4` で選択ビルド |
 | `upstream/SignalsAndGateways` | 既存CAN側アプリを改修、INET4 FieldsChunkによる双方向ゲートウェイと、IEEE 1722 AVTPゲートウェイ（`src-inet4/.../avtp/`）を追加。`Makefile.inet4` で選択ビルド |
 | `upstream/inet` | 公式v4.7.0をビルド。独自のプロトコル改修なし |
+| `upstream/SOA4CoRE` | `src-inet4/` にSOME/IP・SOME/IP-SD経路をINET4へ移植（元の `src/` は未変更）。`Makefile.inet4` でビルド。AVB/SRP、QoSネゴシエーション、ゲートウェイ、同期パブリッシャは未移植 |
 | `upstream/Open1722` | 試験専用。改修なし。`tests/avtp/open1722_decode.c` と組み合わせてpcapのAVTPDUを照合 |
 
 元の著作権・ライセンスを各cloneに保持しています。cloneの基準コミットと配布物SHA256は [sources.lock.json](sources.lock.json)、変更は [patches/](patches/) に保存しています。`upstream/` とビルド成果物をルートGitに重複登録せず、パッチから復元する構成です。
@@ -177,6 +180,8 @@ flowchart LR
 - [CoRE4INET](https://github.com/CoRE-RG/CoRE4INET) / [FiCo4OMNeT](https://github.com/CoRE-RG/FiCo4OMNeT) / [SignalsAndGateways](https://github.com/CoRE-RG/SignalsAndGateways)
 - [Bosch CAN FD](https://www.bosch-semiconductors.com/products/ip-modules/can-protocols/can-fd/)
 - [COVESA Open1722](https://github.com/COVESA/Open1722)（IEEE 1722参照実装。フィールド配置の照合と試験に使用）
+- [CoRE-RG/SOA4CoRE](https://github.com/CoRE-RG/SOA4CoRE)（SOME/IP・SOME/IP-SDミドルウェア。INET4へ移植）
+- [Scapy](https://scapy.net/)（SOME/IP・SD実装を試験の参照デコーダとして使用。配布物には含めない）
 
 ## 開発・再配布
 

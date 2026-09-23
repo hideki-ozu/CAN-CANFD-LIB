@@ -17,6 +17,10 @@
       "url": "https://github.com/CoRE-RG/SignalsAndGateways.git",
       "commit": "017de33f2d04005371b77d55617f0f570143830c"
     },
+    "SOA4CoRE": {
+      "url": "https://github.com/CoRE-RG/SOA4CoRE.git",
+      "commit": "0c79bae0acc041a3bd96ac7f33c31d167a7492ae"
+    },
     "Open1722": {
       "url": "https://github.com/COVESA/Open1722.git",
       "commit": "e0a9fca08e9a4f488d4aa4ec8d918565dc362cca",
