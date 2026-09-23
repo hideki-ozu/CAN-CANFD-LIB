@@ -16,6 +16,11 @@
     "SignalsAndGateways": {
       "url": "https://github.com/CoRE-RG/SignalsAndGateways.git",
       "commit": "017de33f2d04005371b77d55617f0f570143830c"
+    },
+    "Open1722": {
+      "url": "https://github.com/COVESA/Open1722.git",
+      "commit": "e0a9fca08e9a4f488d4aa4ec8d918565dc362cca",
+      "purpose": "test-only IEEE 1722 reference decoder (not linked into simulations)"
     }
   },
   "omnetpp": {

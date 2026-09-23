@@ -12,6 +12,7 @@ included in this Git repository.
 | `patches/CoRE4INET.patch` | [CoRE-RG/CoRE4INET](https://github.com/CoRE-RG/CoRE4INET) | LGPL-3.0-or-later notices in modified source; original authors and notices retained. See `LICENSES/CoRE4INET-LGPL-3.0.txt`. |
 | `patches/SignalsAndGateways.patch` | [CoRE-RG/SignalsAndGateways](https://github.com/CoRE-RG/SignalsAndGateways) | LGPL-3.0-or-later notices in modified source; original notices retained. See `LICENSES/SignalsAndGateways-LGPL-3.0.txt`. |
 | INET (fetched, unmodified) | [inet-framework/inet](https://github.com/inet-framework/inet) | LGPL; see `LICENSES/INET-LGPL-3.0.txt` and per-file notices in the fetched source. |
+| Open1722 (fetched, unmodified, test-only) | [COVESA/Open1722](https://github.com/COVESA/Open1722) | BSD 3-Clause; Intel Corporation, COVESA and contributors (see `upstream/Open1722/LICENSE`). Compiled only into the local test helper `.local/bin/open1722_decode`; not linked into or distributed with the simulation libraries. |
 
 A copy of GPLv3, referenced by LGPLv3, is provided in `LICENSES/GPL-3.0.txt`.
 New source additions within the patches declare their license in their headers.
@@ -19,7 +20,10 @@ The top-level BSD license does not replace any upstream license.
 
 Local modifications add CAN-FD metadata, validation and approximate timing to
 FiCo4OMNeT; migrate the selected CoRE background application to INET4; and adapt
-CAN gateway applications plus a new INET4 packet bridge in SignalsAndGateways.
+CAN gateway applications plus a new INET4 packet bridge and an IEEE 1722 (AVTP)
+ACF CAN gateway in SignalsAndGateways. The IEEE 1722 field layout was implemented
+from the standard's field definitions and cross-checked against Open1722; no
+Open1722 source code is copied into the patches.
 These are independent local changes, not upstream releases or endorsements.
 
 OMNeT++ remains separately installed under its own license. The optional

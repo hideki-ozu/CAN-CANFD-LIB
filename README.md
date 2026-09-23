@@ -4,7 +4,7 @@
 
 対象は **OMNeT++ 6.4.0 / INET 4.7.0 / Linux・WSL2**。通常のセットアップは既存OMNeT++の設定・ソース・ビルド成果物を変更せず、管理者権限も使いません。INETやCoRE関連ライブラリが未導入の状態から実行できます。
 
-**対応範囲:** CAN本体の **FiCo4OMNeT** をCAN-FD対応に改修し、SignalsAndGatewaysをINET4へ接続しています。CoRE4INETは既存 `BGTrafficSourceApp` の選択移植です。旧CoRE4INET全体の移植ではなく、AS6802/TTEthernet、旧AVB/SRP、旧Qbv等は未移植です。CAN-FDの時間計算はイベント単位の近似です。[詳細](docs/CORE_PORT.md)
+**対応範囲:** CAN本体の **FiCo4OMNeT** をCAN-FD対応に改修し、SignalsAndGatewaysをINET4へ接続しています。CAN/CAN-FDのEthernet転送は、独自ヘッダに加えて **IEEE 1722 AVTP**（NTSCF/TSCF + ACF CAN/CAN Brief、EtherType 0x22F0）に対応します（[詳細](docs/AVTP.md)）。CoRE4INETは既存 `BGTrafficSourceApp` の選択移植です。旧CoRE4INET全体の移植ではなく、AS6802/TTEthernet、旧AVB/SRP、旧Qbv等は未移植です。CAN-FDの時間計算はイベント単位の近似です。[詳細](docs/CORE_PORT.md)
 
 ## Claude Codeにセットアップを依頼する
 
@@ -28,7 +28,7 @@ INETと各CoREソースの取得、パッチ適用、releaseビルド、CAN単�
 |---|---|
 | OS | Ubuntu 24.04 x86_64 / WSL2で検証。その他Linuxは未検証。Windowsネイティブ・macOSはセットアップ対象外 |
 | OMNeT++ | **6.4.0**、release共有ライブラリがビルド済み。`setenv` と `Makefile.inc` がある開発用インストール |
-| ツール | Bash、Git、GNU make、Python **3.10以上**、そのOMNeT++を構築したC++コンパイラ（g++またはclang++等） |
+| ツール | Bash、Git、GNU make、Python **3.10以上**、そのOMNeT++を構築したC++コンパイラ（g++またはclang++等）、AVTP試験用のCコンパイラ（`cc`/gcc/clang） |
 | OMNeT++ツール | `opp_run`、`opp_makemake`、`opp_msgc`。標準サンプルが実行でき、モデルをコンパイルできる環境 |
 | 通信 | GitHubから公開ソースを取得できること。GitHubアカウントやトークンは不要 |
 | 容量・メモリ | 空きディスク目安5GB以上。並列数は既定4。メモリが少ない場合は `BUILD_JOBS=2` または1 |
@@ -58,10 +58,10 @@ BUILD_JOBS=4 ./scripts/setup.sh 2>&1 | tee logs/setup.log
 セットアップは次の順に実行します。
 
 1. バージョン、共有ライブラリ構成、コンパイラ、必要コマンド、`opp_run` の実行を確認。
-2. `sources.lock.json` のコミットでINET、FiCo4OMNeT、CoRE4INET、SignalsAndGatewaysを `upstream/` に取得。
+2. `sources.lock.json` のコミットでINET、FiCo4OMNeT、CoRE4INET、SignalsAndGateways、Open1722（AVTP試験専用の参照デコーダ。シミュレーションにはリンクしない）を `upstream/` に取得。
 3. `patches/` の改修を適用。適用済みなら再適用せず、異なるコミットや競合する変更があれば停止。
 4. INETと3つの改修ライブラリを **MODE=release** でビルド。
-5. CAN単体の15項目と、混在ネットワーク4構成の検証を実行。
+5. CAN単体の15項目、混在ネットワーク4構成、IEEE 1722 AVTPの検証（自己試験33項目・9構成（TSN・gPTPを含む）・pcap/Open1722照合・異常系4件）を実行。
 
 使用したOMNeT++のパスは、Git管理外の `.local/omnetpp-root` に保存します。次の端末でも起動スクリプトが参照します。`OMNETPP_ROOT` の明示指定が最優先です。
 
@@ -74,7 +74,8 @@ BUILD_JOBS=4 ./scripts/setup.sh 2>&1 | tee logs/setup.log
 ```bash
 ./scripts/run-mixed.sh Mixed       # CLIで100msのシミュレーション
 ./scripts/run-gui.sh Mixed         # Qtenvを開く。Runボタンで開始
-make test                         # 動作確認を再実行
+./scripts/run-mixed.sh AvtpTscf    # IEEE 1722 TSCFでCAN/CAN-FDを転送
+make test                         # 動作確認を再実行（AVTPのみは make test-avtp）
 ```
 
 | 設定 | 内容 |
@@ -83,12 +84,23 @@ make test                         # 動作確認を再実行
 | `Classic` | Classical CAN 8Bのみ |
 | `FdNoBrs` | CAN-FDのBRS無効 |
 | `LoadedEthernet` | 混在通信に約75MbpsのEthernet負荷を追加 |
+| `AvtpNtscf` | IEEE 1722 NTSCF + ACF CAN（message_timestamp付き） |
+| `AvtpTscf` | IEEE 1722 TSCF + ACF CAN。受信側は提示時刻（500us後）にCANへ送出 |
+| `AvtpBriefAggregated` | NTSCF + ACF CAN Brief。1PDUに2フレームを集約 |
+| `AvtpLoadedEthernet` | `AvtpTscf` に約75MbpsのEthernet負荷を追加 |
+| `AvtpFdNoBrs` | `AvtpNtscf` でCAN-FDのBRS無効 |
+| `AvtpTscfOverload` | TSCFで、スイッチ出力をベストエフォート過負荷にする（TSNなし） |
+| `AvtpTsn` | 同じ負荷をINET TSN上で実行。AVTPに802.1Q PCP 3/VID 2、スイッチでクレジットベースシェーパ |
+| `AvtpTsnGptp` | `AvtpTsn` + gPTP時刻同期（発振器±50ppm） |
+| `AvtpTsnFreeRunning` | 発振器±50ppmで時刻同期なし（比較用） |
 
 例: `./scripts/run-mixed.sh LoadedEthernet`。GUIの例: `./scripts/run-gui.sh FdNoBrs`。
 
 - `results/canfd/report.json`: 15項目すべて `passed: true`、`failures: []`。
 - `results/mixed/verification.json`: 4構成で各ゲートウェイが20送信/20受信、各ECUが20受信。ペイロード全バイトも検証。
 - `results/mixed/<設定>/`: OMNeT++の `.sca` / `.vec`。
+- `results/avtp/report.json`: AVTP自己試験（`failed: 0`）、9構成の送受信・ワイヤ検証、異常系、TSN比較の結果。
+- `results/mixed/Avtp*/gatewayA.pcap`・`gatewayB.pcap`: AVTPフレームの記録（ナノ秒精度pcap）。
 - `logs/`: 混在テストのログ。CAN単体のログは `results/canfd/`。
 
 BRS無効の64BフレームがBRS有効より遅いこと、11/29bitの仲裁、不正DLCやFD RTRの拒否、旧CAN例も確認します。[検証記録](docs/VALIDATION.md)
@@ -140,8 +152,9 @@ flowchart LR
 |---|---|
 | `upstream/FiCo4OMNeT` | CAN-FDフィールド、DLC・ID検証、BRS、送受信共通時間計算、11/29bit仲裁、待ち行列、C++17対応 |
 | `upstream/CoRE4INET` | 既存BGTrafficSourceAppをINET4 Packet/ChunkとEthernetSocketIoへ移植。`Makefile.inet4` で選択ビルド |
-| `upstream/SignalsAndGateways` | 既存CAN側アプリを改修、INET4 FieldsChunkによる双方向ゲートウェイを追加。`Makefile.inet4` で選択ビルド |
+| `upstream/SignalsAndGateways` | 既存CAN側アプリを改修、INET4 FieldsChunkによる双方向ゲートウェイと、IEEE 1722 AVTPゲートウェイ（`src-inet4/.../avtp/`）を追加。`Makefile.inet4` で選択ビルド |
 | `upstream/inet` | 公式v4.7.0をビルド。独自のプロトコル改修なし |
+| `upstream/Open1722` | 試験専用。改修なし。`tests/avtp/open1722_decode.c` と組み合わせてpcapのAVTPDUを照合 |
 
 元の著作権・ライセンスを各cloneに保持しています。cloneの基準コミットと配布物SHA256は [sources.lock.json](sources.lock.json)、変更は [patches/](patches/) に保存しています。`upstream/` とビルド成果物をルートGitに重複登録せず、パッチから復元する構成です。
 
@@ -151,8 +164,8 @@ flowchart LR
 - BRSの公称／データ速度を別々に計算し、送信占有時間と受信完了時間に同じ関数を使用します。
 - ClassicalフレームとFDフレームが混在するバスのノードはFDを許容するものとして扱います。旧CAN専用ハードウェアがFDフレームをエラーにする挙動はありません。
 - FDのRTR、FDバス上の確率的エラー注入は明示的に拒否します。同一ID・同一形式の複数データ送信元による同時競合も、ビット衝突モデルがないため拒否します。同一送信元の待ち行列は許可します。
-- ゲートウェイはデータフレーム用です。CAN ID・FD/BRS・形式・DLC・ペイロード全バイト・生成時刻を保持します。24Bの独自シミュレーション用ヘッダを使用し、実機の標準カプセル化仕様ではありません。
-- ゲートウェイは宣言済みFCSのパケットシミュレーション用です。計算FCS、PCAPへのバイト列直列化、実ネットワーク連携には追加のserializer実装が必要です。
+- ゲートウェイはデータフレーム用です。CAN ID・FD/BRS・形式・DLC・ペイロード全バイト・生成時刻を保持します。既定の `CanEthernetApp` は24Bの独自シミュレーション用ヘッダで、実機の標準カプセル化仕様ではありません。宣言済みFCSのパケットシミュレーション専用です。
+- 標準形式が必要な場合は `AvtpCanGatewayApp`（IEEE 1722 AVTP）を使います。バイト精度のserializerを持ち、計算FCSとPCAP記録に対応します。INETのTSN機能（802.1Qタグ付け、クレジットベースシェーパ、gPTP）と組み合わせて使えます（`AvtpTsn*` 構成）。SRPプロトコル自体は静的設定で代替、ACF CAN v1形式のみです。[docs/AVTP.md](docs/AVTP.md)
 - Qtenv 2D表示は動作確認済みです。検証元のOMNeT++ではOSG・組込みPython・scave Pythonバインディングを無効にしていましたが、本リポジトリの通常セットアップは導入先の設定を変更しません。
 
 ## 公式情報
@@ -163,6 +176,7 @@ flowchart LR
 - [INET 4.7.0](https://github.com/inet-framework/inet/releases/tag/v4.7.0)
 - [CoRE4INET](https://github.com/CoRE-RG/CoRE4INET) / [FiCo4OMNeT](https://github.com/CoRE-RG/FiCo4OMNeT) / [SignalsAndGateways](https://github.com/CoRE-RG/SignalsAndGateways)
 - [Bosch CAN FD](https://www.bosch-semiconductors.com/products/ip-modules/can-protocols/can-fd/)
+- [COVESA Open1722](https://github.com/COVESA/Open1722)（IEEE 1722参照実装。フィールド配置の照合と試験に使用）
 
 ## 開発・再配布
 

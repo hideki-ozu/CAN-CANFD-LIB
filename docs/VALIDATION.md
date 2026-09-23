@@ -34,3 +34,35 @@ FD 64Bの平均エンドツーエンド遅延は、この設定でBRS有効1.112
 - 使用したOMNeT++の `Makefile.inc` と `configure.user` のSHA256は導入前後で一致しました。
 
 この検証は同じLinuxマシン上の独立したソース／ビルドディレクトリで実施したもので、別OS・別マシンでの検証ではありません。
+
+## IEEE 1722 AVTP（2026-09-23）
+
+`python3 tests/test_avtp.py` がすべて成功しました（結果: `results/avtp/report.json`）。内容の詳細は [AVTP.md](AVTP.md) を参照してください。
+
+- コーデック自己試験: 33項目成功、失敗0。
+- ワイヤ検証: 9構成すべてで、各ゲートウェイのpcapに記録された全AVTPDUを独立のPythonパーサで検査しました。Open1722（commit `e0a9fca`）の参照デコーダでも全PDUが `IsValid` と判定され、全フィールドが一致しました。送信側と受信側のpcapはバイト単位で一致しました。
+- 異常系: stream_id不一致20/20件破棄、can_bus_id不一致20/20件破棄、提示時刻超過の `drop` で20/20件破棄、`forward` で20/20件転送。
+- 変異試験: serializerのBRS↔FDF入替え、RTR・TUのビット位置誤り、timestampのバイト順誤りを、すべて自己試験で検出しました。
+
+| 構成 | 各ゲートウェイPDU | ACF/PDU | ECU B平均遅延 ID256（8B） | ID512（FD 64B） | 提示時刻の余裕 最小/最大 |
+|---|---:|---:|---:|---:|---:|
+| AvtpNtscf | 20 | 1 | 0.779ms | 1.112ms | – |
+| AvtpTscf | 20 | 1 | 0.953ms | 1.397ms | 474.1/483.1us |
+| AvtpBriefAggregated | 10 | 2 | 0.811ms | 1.144ms | – |
+| AvtpLoadedEthernet | 20 | 1 | 0.953ms | 1.397ms | 367.4/483.1us |
+| AvtpFdNoBrs | 20 | 1 | 1.586ms | 2.726ms | – |
+
+いずれの構成でも、各ゲートウェイ20フレーム送受信、各ECU20フレーム受信、破棄・欠落・順序異常0件でした。背景Ethernet負荷はLoadedEthernetで594フレーム、それ以外で89フレームを受信しています。TSCFでは約75Mbpsの負荷によって提示時刻の余裕が約107us減りますが、CAN側の遅延は無負荷時と一致しました。NTSCFのID512遅延1.112msは、独自ヘッダの `Mixed` 構成と同じ値です。
+
+### INET TSNとの組合せ
+
+| 構成 | 各ECU受信 | 提示時刻超過 | Ethernet最大通過時間 A→B | 提示時刻誤差 最小/最大 |
+|---|---:|---:|---:|---:|
+| AvtpTscfOverload（TSNなし） | 20 | 0 | 270.1us | 0 / 0 |
+| AvtpTsn（PCP 3 + CBS） | 20 | 0 | 134.1us | 0 / 0 |
+| AvtpTsnGptp（+gPTP、±50ppm） | 20 | 0 | 121.5us | −105ns / +105ns |
+| AvtpTsnFreeRunning（±50ppm、同期なし） | 20 | 0 | – | −9.21us / +9.21us |
+
+TSN構成のpcapでは、全AVTPフレームに802.1Qタグ（PCP 3、VID 2、内側EtherType 0x22F0）が付き、Open1722でも全PDUが有効と判定されました。
+
+既存の試験（CAN単体15項目、混在4構成）も、AVTP追加後に再実行してすべて成功しました。値は上記の近似モデルによるもので、実機測定ではありません。

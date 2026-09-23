@@ -7,7 +7,7 @@ Read README.md before executing setup. It is the complete user-facing installati
 - Run scripts/doctor.sh, then BUILD_JOBS=4 scripts/setup.sh (reduce jobs for low memory).
 - Normal setup must not call build-runtime.sh or setup-runtime-deps.sh. Do not change OMNeT++ configure.user, system packages, shell startup files, or authentication settings.
 - Sources are pinned by sources.lock.json. Preserve local edits: no reset/clean to bypass commit or patch mismatches.
-- Success requires native CAN/CAN-FD tests and all four mixed network configurations, not only a successful build. Inspect results/canfd/report.json and results/mixed/verification.json.
+- Success requires native CAN/CAN-FD tests, all four mixed network configurations and the IEEE 1722 AVTP tests (tests/test_avtp.py), not only a successful build. Inspect results/canfd/report.json, results/mixed/verification.json and results/avtp/report.json.
 - If prerequisites are missing, report the specific condition. Do not silently substitute framework versions or weaken tests.
-- Report CLI/GUI launch commands and the limitations: selected CoRE application migration, unported AS6802/AVB parts, approximate CAN-FD timing.
+- Report CLI/GUI launch commands and the limitations: selected CoRE application migration, unported AS6802/AVB parts, approximate CAN-FD timing, AVTP default configs use ideal time without TSN; AvtpTsn* configs use INET TSN (802.1Q, CBS, gPTP) with static SRP-equivalent forwarding (docs/AVTP.md).
 - Keep .local, upstream checkouts, credentials, build products, logs, and results out of commits. Publish source changes as patches plus tests/docs.
