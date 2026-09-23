@@ -1,4 +1,4 @@
-.PHONY: all setup doctor test run gui patches
+.PHONY: all setup doctor test test-avtp run run-avtp gui patches
 all:
 	./scripts/build-libraries.sh
 setup:
@@ -8,8 +8,13 @@ doctor:
 test:
 	python3 tests/test_canfd.py
 	python3 tests/test_mixed.py
+	python3 tests/test_avtp.py
+test-avtp:
+	python3 tests/test_avtp.py
 run:
 	./scripts/run-mixed.sh Mixed
+run-avtp:
+	./scripts/run-mixed.sh AvtpTscf
 gui:
 	./scripts/run-gui.sh Mixed
 patches:

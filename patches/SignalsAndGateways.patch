@@ -818,6 +818,1425 @@ index 0000000..1dd153d
 +    	//Connection to the gateway   
 +        input in @labels(DataFrame);
 +}
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/Avtp.msg b/src-inet4/signalsandgateways/inet4/avtp/Avtp.msg
+new file mode 100644
+index 0000000..b1d42c5
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/Avtp.msg
+@@ -0,0 +1,79 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// IEEE 1722-2016 AVTP control formats carrying ACF CAN messages.
++// Field layout (quadlet/bit offsets) follows IEEE Std 1722-2016 clauses 9.2 and 9.4
++// and was cross-checked against COVESA Open1722 (include/avtp/acf/*.h).
++// Every chunk below has a byte-exact serializer (AvtpSerializer.cc).
++import inet.common.INETDefs;
++import inet.common.packet.chunk.Chunk;
++import inet.common.TagBase;
++
++namespace SignalsAndGateways;
++
++cplusplus {{
++static const uint8_t AVTP_SUBTYPE_TSCF = 0x05;
++static const uint8_t AVTP_SUBTYPE_NTSCF = 0x82;
++static const uint8_t ACF_MSG_TYPE_CAN = 0x01;
++static const uint8_t ACF_MSG_TYPE_CAN_BRIEF = 0x02;
++static const int AVTP_NTSCF_HEADER_BYTES = 12;
++static const int AVTP_TSCF_HEADER_BYTES = 24;
++static const int ACF_CAN_HEADER_BYTES = 16;
++static const int ACF_CAN_BRIEF_HEADER_BYTES = 8;
++}}
++
++// Non-Time-Synchronous Control Format header (subtype 0x82), 12 bytes.
++class AvtpNtscfHeader extends inet::FieldsChunk
++{
++    chunkLength = inet::B(12);
++    uint8_t subtype = AVTP_SUBTYPE_NTSCF;
++    bool sv = true;             // stream_id valid
++    uint8_t version = 0;        // 3 bits
++    uint16_t ntscfDataLength;   // 11 bits, bytes of ACF messages that follow
++    uint8_t sequenceNum;
++    uint64_t streamId;
++}
++
++// Time-Synchronous Control Format header (subtype 0x05), 24 bytes.
++class AvtpTscfHeader extends inet::FieldsChunk
++{
++    chunkLength = inet::B(24);
++    uint8_t subtype = AVTP_SUBTYPE_TSCF;
++    bool sv = true;
++    uint8_t version = 0;
++    bool mr = false;            // media clock restart
++    bool tv = true;             // avtp_timestamp valid
++    uint8_t sequenceNum;
++    bool tu = false;            // timestamp uncertain
++    uint64_t streamId;
++    uint32_t avtpTimestamp;     // gPTP presentation time, ns modulo 2^32
++    uint16_t streamDataLength;  // bytes of ACF messages that follow
++}
++
++// ACF CAN (type 0x01, 16-byte header) or ACF CAN Brief (type 0x02, 8-byte header).
++// The chunk length always equals acfMsgLength quadlets; pad bytes trail the payload.
++class AcfCanMessage extends inet::FieldsChunk
++{
++    uint8_t acfMsgType = ACF_MSG_TYPE_CAN;  // 7 bits
++    uint16_t acfMsgLength;      // 9 bits, quadlets including this header
++    uint8_t pad;                // 2 bits, padding bytes after payload
++    bool mtv;                   // message_timestamp valid (always false for Brief)
++    bool rtr;
++    bool eff;                   // 29-bit identifier
++    bool brs;
++    bool fdf;                   // CAN FD frame
++    bool esi;
++    uint8_t canBusId;           // 5 bits
++    uint64_t messageTimestamp;  // gPTP ns; present only in ACF CAN (not Brief)
++    uint32_t canIdentifier;     // 29 bits
++    uint8_t payload[];
++}
++
++// Simulation-only metadata (never serialized): original ECU creation time of a
++// tunnelled frame, so end-to-end delay stays measurable when mtv is false.
++// intendedPresentationTime: simulation time at which the talker's gPTP clock reads the
++// TSCF presentation time (-1 for NTSCF); lets listeners measure synchronization error.
++class AvtpCanOriginTag extends inet::TagBase
++{
++    simtime_t sourceTime;
++    simtime_t intendedPresentationTime = -1;
++}
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/AvtpCanGatewayApp.cc b/src-inet4/signalsandgateways/inet4/avtp/AvtpCanGatewayApp.cc
+new file mode 100644
+index 0000000..5a97b33
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/AvtpCanGatewayApp.cc
+@@ -0,0 +1,494 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// CAN/CAN-FD <-> IEEE 1722 (AVTP) gateway application for INET4 hosts.
++// Talker: FiCo CAN frames -> ACF CAN / ACF CAN Brief messages in NTSCF or TSCF PDUs,
++// EtherType 0x22F0, to a (multicast) stream destination MAC.
++// Listener: parses the received bytes with the validating decoder in AvtpCodec and
++// forwards valid CAN messages to the local CAN bus (TSCF: at presentation time).
++// Ethernet access uses INET protocol registration (like Gptp) rather than a socket,
++// so the same module works on StandardHost and on TsnDevice, where frames pass the
++// bridging layer (stream identification, 802.1Q PCP/VLAN encoding, shaping).
++// gPTP time is the node clock given by clockModule (e.g. a TsnDevice clock that
++// IEEE 802.1AS gPTP synchronizes). Without a clock module it equals simulation time.
++#include <map>
++#include <string>
++#include <vector>
++
++#include "inet/applications/base/ApplicationBase.h"
++#include "inet/common/clock/ClockUserModuleMixin.h"
++#include "inet/common/ModuleAccess.h"
++#include "inet/common/Protocol.h"
++#include "inet/common/ProtocolTag_m.h"
++#include "inet/common/packet/Packet.h"
++#include "inet/linklayer/common/MacAddressTag_m.h"
++#include "inet/common/IProtocolRegistrationListener.h"
++#include "inet/linklayer/common/InterfaceTag_m.h"
++#include "inet/networklayer/common/NetworkInterface.h"
++#include "inet/networklayer/contract/IInterfaceTable.h"
++#include "fico4omnet/linklayer/can/CanFrameTiming.h"
++#include "fico4omnet/linklayer/can/messages/CanDataFrame_m.h"
++#include "signalsandgateways/inet4/avtp/Avtp_m.h"
++#include "signalsandgateways/inet4/avtp/AvtpCodec.h"
++
++using namespace omnetpp;
++using namespace inet;
++using namespace FiCo4OMNeT;
++
++namespace SignalsAndGateways {
++
++class AvtpCanGatewayApp : public ClockUserModuleMixin<ApplicationBase>
++{
++  protected:
++    enum Format { NTSCF, TSCF };
++    struct PendingFrame {
++        CanDataFrame *frame;
++        clocktime_t receptionTime;  // gPTP time of CAN reception
++    };
++
++    // configuration
++    Format format = NTSCF;
++    bool brief = false;
++    bool messageTimestampValid = true;
++    int maxAcfMessagesPerPdu = 1;
++    int maxPduBytes = 1500;
++    simtime_t aggregationTimeout;
++    simtime_t processingDelay;
++    simtime_t maxTransitTime;
++    uint8_t canBusId = 0;
++    int acceptCanBusId = -1;
++    bool hasListenStreamId = false;
++    uint64_t listenStreamId = 0;
++    bool dropLate = false;
++    double bitStuffingPercentage = 0;
++    MacAddress destAddress;
++    MacAddress listenAddress;
++    uint64_t streamId = 0;
++
++    NetworkInterface *networkInterface = nullptr;
++    cMessage *flushTimer = nullptr;
++    std::vector<PendingFrame> pending;
++    uint8_t sequenceNum = 0;
++    std::map<uint64_t, uint8_t> expectedSequence;
++
++    // statistics
++    long canToAvtp = 0, pdusSent = 0, avtpToCan = 0, pdusReceived = 0;
++    long sequenceLost = 0, sequenceOutOfOrder = 0;
++    long droppedMalformedPdus = 0, droppedStreamId = 0, droppedBusId = 0;
++    long droppedInvalidMessages = 0, droppedRtr = 0, unsupportedAcfMessages = 0;
++    long latePresentations = 0, droppedLate = 0, originTagMissing = 0, ignoredOtherDestinations = 0;
++    simsignal_t txSignal, rxSignal, latencySignal, messagesPerPduSignal, latenessSignal, slackSignal, pduLengthSignal;
++    simsignal_t presentationErrorSignal;
++
++  protected:
++    virtual int numInitStages() const override { return NUM_INIT_STAGES; }
++
++    static uint64_t parseStreamId(const char *text)
++    {
++        try {
++            size_t used = 0;
++            std::string value(text);
++            uint64_t id = std::stoull(value, &used, 0);
++            if (used != value.size())
++                throw cRuntimeError("trailing characters");
++            return id;
++        }
++        catch (const std::exception&) {
++            throw cRuntimeError("Invalid stream ID '%s'; use e.g. \"0x0200000000010001\"", text);
++        }
++    }
++
++    virtual void initialize(int stage) override
++    {
++        ClockUserModuleMixin::initialize(stage);
++        if (stage == INITSTAGE_LOCAL) {
++            const std::string formatName = par("format").stdstringValue();
++            if (formatName == "ntscf")
++                format = NTSCF;
++            else if (formatName == "tscf")
++                format = TSCF;
++            else
++                throw cRuntimeError("format must be \"ntscf\" or \"tscf\"");
++            const std::string messageType = par("acfMessageType").stdstringValue();
++            if (messageType != "can" && messageType != "canBrief")
++                throw cRuntimeError("acfMessageType must be \"can\" or \"canBrief\"");
++            brief = messageType == "canBrief";
++            messageTimestampValid = !brief && par("messageTimestampValid").boolValue();
++            maxAcfMessagesPerPdu = par("maxAcfMessagesPerPdu");
++            maxPduBytes = par("maxPduBytes");
++            aggregationTimeout = par("aggregationTimeout");
++            processingDelay = par("processingDelay");
++            maxTransitTime = par("maxTransitTime");
++            const int busId = par("canBusId");
++            acceptCanBusId = par("acceptCanBusId");
++            if (maxAcfMessagesPerPdu < 1)
++                throw cRuntimeError("maxAcfMessagesPerPdu must be at least 1");
++            if (maxPduBytes < AVTP_TSCF_HEADER_BYTES + ACF_CAN_HEADER_BYTES + 64 || maxPduBytes > 1500)
++                throw cRuntimeError("maxPduBytes must hold one 64-byte CAN FD message and fit a 1500-byte Ethernet payload");
++            if (aggregationTimeout < 0 || processingDelay < 0 || maxTransitTime < 0)
++                throw cRuntimeError("aggregationTimeout, processingDelay and maxTransitTime must be nonnegative");
++            if (busId < 0 || busId > 31 || acceptCanBusId < -1 || acceptCanBusId > 31)
++                throw cRuntimeError("CAN bus IDs are 5-bit values (0..31); acceptCanBusId may be -1 for any");
++            canBusId = busId;
++            const char *listenStream = par("listenStreamId");
++            hasListenStreamId = *listenStream != '\0';
++            if (hasListenStreamId)
++                listenStreamId = parseStreamId(listenStream);
++            const std::string latePolicy = par("latePresentationPolicy").stdstringValue();
++            if (latePolicy != "forward" && latePolicy != "drop")
++                throw cRuntimeError("latePresentationPolicy must be \"forward\" or \"drop\"");
++            dropLate = latePolicy == "drop";
++            bitStuffingPercentage = par("bitStuffingPercentage");
++            destAddress = MacAddress(par("destAddress").stringValue());
++            listenAddress = MacAddress(par("listenAddress").stringValue());
++            flushTimer = new cMessage("avtpFlush");
++            txSignal = registerSignal("canToAvtp");
++            rxSignal = registerSignal("avtpToCan");
++            latencySignal = registerSignal("gatewayLatency");
++            messagesPerPduSignal = registerSignal("acfMessagesPerPdu");
++            latenessSignal = registerSignal("presentationLateness");
++            slackSignal = registerSignal("presentationSlack");
++            pduLengthSignal = registerSignal("avtpPduLength");
++            presentationErrorSignal = registerSignal("presentationError");
++            WATCH(canToAvtp);
++            WATCH(avtpToCan);
++            WATCH(sequenceLost);
++        }
++        else if (stage == INITSTAGE_LINK_LAYER)
++            registerProtocol(Protocol::tsn, gate("socketOut"), gate("socketIn"));
++    }
++
++    virtual void handleStartOperation(LifecycleOperation *operation) override
++    {
++        auto interfaceTable = getModuleFromPar<IInterfaceTable>(par("interfaceTableModule"), this);
++        networkInterface = interfaceTable->findInterfaceByName(par("interface"));
++        if (networkInterface == nullptr)
++            throw cRuntimeError("Cannot find network interface '%s'", par("interface").stringValue());
++        const char *configuredStream = par("streamId");
++        const int uniqueId = par("streamUniqueId");
++        if (uniqueId < 0 || uniqueId > 0xffff)
++            throw cRuntimeError("streamUniqueId must be 0..65535");
++        streamId = *configuredStream != '\0' ? parseStreamId(configuredStream)
++                : (networkInterface->getMacAddress().getInt() << 16) | uint64_t(uniqueId);
++        if (listenAddress.isMulticast())
++            networkInterface->addMulticastMacAddress(listenAddress);
++    }
++
++    virtual void handleStopOperation(LifecycleOperation *operation) override
++    {
++        cancelEvent(flushTimer);
++    }
++
++    virtual void handleCrashOperation(LifecycleOperation *operation) override
++    {
++        cancelEvent(flushTimer);
++    }
++
++    virtual void handleMessageWhenUp(cMessage *message) override
++    {
++        if (message == flushTimer)
++            flush();
++        else if (message->isSelfMessage())
++            releaseToCan(check_and_cast<CanDataFrame *>(message));
++        else if (message->arrivedOn("canIn"))
++            handleCanFrame(check_and_cast<CanDataFrame *>(message));
++        else if (message->arrivedOn("socketIn"))
++            handleEthernetPacket(check_and_cast<Packet *>(message));
++        else
++            throw cRuntimeError("Unexpected message %s", message->getName());
++    }
++
++    // ---- talker ---------------------------------------------------------------
++
++    virtual void handleCanFrame(CanDataFrame *frame)
++    {
++        CanFrameTiming::validateFrame(*frame);
++        if (frame->getRtr())
++            throw cRuntimeError("AVTP CAN gateway forwards data frames only (remote frame %u)", frame->getCanID());
++        if (destAddress.isUnspecified())
++            throw cRuntimeError("CAN frame received but destAddress is not configured (listener-only gateway)");
++        emit(txSignal, frame);
++        ++canToAvtp;
++        pending.push_back({frame, getClockTime()});
++        if (!flushTimer->isScheduled())
++            scheduleAfter(processingDelay + aggregationTimeout, flushTimer);
++        if ((int)pending.size() >= maxAcfMessagesPerPdu) {
++            simtime_t due = simTime() + processingDelay;
++            if (flushTimer->getArrivalTime() > due)
++                rescheduleAt(due, flushTimer);
++        }
++    }
++
++    static size_t acfLength(size_t headerLength, size_t payloadLength)
++    {
++        return (headerLength + payloadLength + 3) / 4 * 4;
++    }
++
++    Ptr<AcfCanMessage> createAcfMessage(const PendingFrame& entry) const
++    {
++        const CanDataFrame *frame = entry.frame;
++        const size_t headerLength = brief ? ACF_CAN_BRIEF_HEADER_BYTES : ACF_CAN_HEADER_BYTES;
++        const size_t payloadLength = frame->getPayloadLength();
++        const size_t total = acfLength(headerLength, payloadLength);
++        auto message = makeShared<AcfCanMessage>();
++        message->setAcfMsgType(brief ? ACF_MSG_TYPE_CAN_BRIEF : ACF_MSG_TYPE_CAN);
++        message->setAcfMsgLength(total / 4);
++        message->setPad(total - headerLength - payloadLength);
++        message->setMtv(messageTimestampValid);
++        message->setRtr(false);
++        message->setEff(frame->getExtendedId());
++        message->setBrs(frame->getBrs());
++        message->setFdf(frame->getFd());
++        message->setEsi(false);
++        message->setCanBusId(canBusId);
++        if (messageTimestampValid)
++            message->setMessageTimestamp(entry.receptionTime.inUnit(SIMTIME_NS));
++        message->setCanIdentifier(frame->getCanID());
++        message->setPayloadArraySize(payloadLength);
++        for (size_t i = 0; i < payloadLength; ++i)
++            message->setPayload(i, frame->getPayloadBytes(i));
++        message->setChunkLength(B(total));
++        return message;
++    }
++
++    virtual void flush()
++    {
++        const size_t headerLength = format == TSCF ? AVTP_TSCF_HEADER_BYTES : AVTP_NTSCF_HEADER_BYTES;
++        size_t index = 0;
++        while (index < pending.size()) {
++            std::vector<Ptr<AcfCanMessage>> messages;
++            std::vector<simtime_t> sourceTimes;  // simulation-only origin metadata
++            size_t dataLength = 0;
++            while (index < pending.size() && (int)messages.size() < maxAcfMessagesPerPdu) {
++                auto message = createAcfMessage(pending[index]);
++                const size_t length = B(message->getChunkLength()).get();
++                if (!messages.empty() && headerLength + dataLength + length > (size_t)maxPduBytes)
++                    break;
++                dataLength += length;
++                messages.push_back(message);
++                sourceTimes.push_back(pending[index].frame->getTimestamp());
++                delete pending[index].frame;
++                ++index;
++            }
++            sendPdu(messages, sourceTimes, dataLength);
++        }
++        pending.clear();
++    }
++
++    virtual void sendPdu(const std::vector<Ptr<AcfCanMessage>>& messages, const std::vector<simtime_t>& sourceTimes, size_t dataLength)
++    {
++        auto packet = new Packet(format == TSCF ? "AVTP-TSCF-CAN" : "AVTP-NTSCF-CAN");
++        const clocktime_t presentation = getClockTime() + ClockTime::from(maxTransitTime);
++        // Simulation time at which the talker's own gPTP clock reaches the presentation time.
++        const simtime_t intendedPresentation = format == TSCF ? computeSimTimeFromClockTime(presentation) : simtime_t(-1);
++        if (format == TSCF) {
++            auto header = makeShared<AvtpTscfHeader>();
++            header->setSequenceNum(sequenceNum);
++            header->setStreamId(streamId);
++            header->setTv(true);
++            header->setAvtpTimestamp(static_cast<uint32_t>(presentation.inUnit(SIMTIME_NS)));
++            header->setStreamDataLength(dataLength);
++            packet->insertAtBack(header);
++        }
++        else {
++            if (dataLength > 0x7ff)
++                throw cRuntimeError("NTSCF data length %zu exceeds 2047 bytes", dataLength);
++            auto header = makeShared<AvtpNtscfHeader>();
++            header->setSequenceNum(sequenceNum);
++            header->setStreamId(streamId);
++            header->setNtscfDataLength(dataLength);
++            packet->insertAtBack(header);
++        }
++        for (size_t i = 0; i < messages.size(); ++i) {
++            const b offset = packet->getTotalLength();
++            packet->insertAtBack(messages[i]);
++            auto tag = packet->addRegionTag<AvtpCanOriginTag>(offset, messages[i]->getChunkLength());
++            tag->setSourceTime(sourceTimes[i]);
++            tag->setIntendedPresentationTime(intendedPresentation);
++        }
++        ++sequenceNum;
++        packet->addTag<PacketProtocolTag>()->setProtocol(&Protocol::tsn);
++        packet->addTag<MacAddressReq>()->setDestAddress(destAddress);
++        packet->addTag<InterfaceReq>()->setInterfaceId(networkInterface->getInterfaceId());
++        packet->addTag<DispatchProtocolReq>()->setProtocol(networkInterface->getProtocol() ? networkInterface->getProtocol() : &Protocol::ethernetMac);
++        emit(messagesPerPduSignal, (long)messages.size());
++        emit(pduLengthSignal, packet->getByteLength());
++        ++pdusSent;
++        send(packet, "socketOut");
++    }
++
++    // ---- listener -------------------------------------------------------------
++
++    virtual void handleEthernetPacket(Packet *packet)
++    {
++        // Registered for every EtherType 0x22F0 frame: keep only the listened stream address.
++        const auto& protocolTag = packet->findTag<PacketProtocolTag>();
++        const auto& macAddressInd = packet->findTag<MacAddressInd>();
++        if (listenAddress.isUnspecified() || protocolTag == nullptr || protocolTag->getProtocol() != &Protocol::tsn
++                || macAddressInd == nullptr || macAddressInd->getDestAddress() != listenAddress) {
++            ++ignoredOtherDestinations;
++            delete packet;
++            return;
++        }
++        ++pdusReceived;
++        const auto bytes = packet->peekDataAsBytes()->getBytes();
++        const avtp::DecodedPdu pdu = avtp::decodePdu(bytes);
++        if (pdu.error != avtp::DecodeError::NONE) {
++            EV_WARN << "Dropping malformed AVTPDU: " << avtp::toString(pdu.error) << endl;
++            ++droppedMalformedPdus;
++            delete packet;
++            return;
++        }
++        if (hasListenStreamId && pdu.streamId != listenStreamId) {
++            ++droppedStreamId;
++            delete packet;
++            return;
++        }
++        checkSequence(pdu);
++
++        std::map<size_t, simtime_t> originTimes;
++        simtime_t intendedPresentation = -1;
++        const b front = packet->getFrontOffset();
++        for (const auto& regionTag : packet->getAllRegionTags<AvtpCanOriginTag>())
++            if (regionTag.getOffset() >= front) {
++                originTimes[B(regionTag.getOffset() - front).get()] = regionTag.getTag()->getSourceTime();
++                intendedPresentation = regionTag.getTag()->getIntendedPresentationTime();
++            }
++
++        simtime_t releaseTime = simTime() + processingDelay;
++        if (pdu.subtype == AVTP_SUBTYPE_TSCF && pdu.tv) {
++            // Presentation time is interpreted on the listener's own gPTP clock.
++            const clocktime_t ready = getClockTime() + ClockTime::from(processingDelay);
++            const clocktime_t presentation = reconstructPresentationTime(pdu.avtpTimestamp);
++            if (presentation >= ready) {
++                releaseTime = computeSimTimeFromClockTime(presentation);
++                emit(slackSignal, (presentation - ready).asSimTime());
++                if (intendedPresentation >= SIMTIME_ZERO)
++                    emit(presentationErrorSignal, releaseTime - intendedPresentation);
++            }
++            else {
++                ++latePresentations;
++                emit(latenessSignal, (ready - presentation).asSimTime());
++                if (dropLate) {
++                    for (const auto& message : pdu.messages)
++                        droppedLate += message.isCan ? 1 : 0;
++                    delete packet;
++                    return;
++                }
++            }
++        }
++        for (const auto& message : pdu.messages)
++            forwardMessage(message, originTimes, releaseTime);
++        delete packet;
++    }
++
++    // avtp_timestamp carries the low 32 bits of gPTP ns; resolve it to the instant
++    // nearest to now (valid while |presentation - now| < 2^31 ns, about 2.1 s).
++    clocktime_t reconstructPresentationTime(uint32_t avtpTimestamp) const
++    {
++        const int64_t now = getClockTime().inUnit(SIMTIME_NS);
++        const int32_t delta = static_cast<int32_t>(avtpTimestamp - static_cast<uint32_t>(now));
++        return ClockTime(now + delta, SIMTIME_NS);
++    }
++
++    void checkSequence(const avtp::DecodedPdu& pdu)
++    {
++        auto it = expectedSequence.find(pdu.streamId);
++        if (it != expectedSequence.end()) {
++            const uint8_t delta = pdu.sequenceNum - it->second;
++            if (delta != 0 && delta < 128)
++                sequenceLost += delta;
++            else if (delta >= 128)
++                ++sequenceOutOfOrder;
++        }
++        expectedSequence[pdu.streamId] = pdu.sequenceNum + 1;
++    }
++
++    void forwardMessage(const avtp::DecodedAcfMessage& message, const std::map<size_t, simtime_t>& originTimes, simtime_t releaseTime)
++    {
++        if (!message.isCan) {
++            ++unsupportedAcfMessages;
++            return;
++        }
++        if (message.error != avtp::DecodeError::NONE) {
++            EV_WARN << "Dropping invalid ACF CAN message: " << avtp::toString(message.error) << endl;
++            ++droppedInvalidMessages;
++            return;
++        }
++        const auto& can = message.can;
++        if (acceptCanBusId >= 0 && can.canBusId != acceptCanBusId) {
++            ++droppedBusId;
++            return;
++        }
++        if (can.rtr) {
++            ++droppedRtr;
++            return;
++        }
++        auto frame = new CanDataFrame("CAN-from-AVTP");
++        frame->setCanID(can.canIdentifier);
++        frame->setExtendedId(can.eff);
++        frame->setFd(can.fdf);
++        frame->setBrs(can.brs);
++        frame->setRtr(false);
++        frame->setPayloadLength(can.payload.size());
++        frame->setDlc(can.fdf ? CanFrameTiming::dlcForPayloadLength(can.payload.size()) : can.payload.size());
++        frame->setPayloadBytesArraySize(can.payload.size());
++        for (size_t i = 0; i < can.payload.size(); ++i)
++            frame->setPayloadBytes(i, can.payload[i]);
++        auto origin = originTimes.find(message.offset);
++        if (origin != originTimes.end())
++            frame->setTimestamp(origin->second);
++        else {
++            ++originTagMissing;
++            frame->setTimestamp(can.mtv ? SimTime(can.messageTimestamp, SIMTIME_NS) : simTime());
++        }
++        CanFrameTiming::validateFrame(*frame);
++        auto envelope = new cPacket("CAN-payload");
++        envelope->setByteLength(frame->getPayloadLength());
++        envelope->setTimestamp(frame->getTimestamp());
++        frame->encapsulate(envelope);
++        frame->setBitLength(CanFrameTiming::frameBitLength(*frame, bitStuffingPercentage));
++        scheduleAt(releaseTime, frame);
++    }
++
++    void releaseToCan(CanDataFrame *frame)
++    {
++        emit(rxSignal, frame);
++        emit(latencySignal, simTime() - frame->getTimestamp());
++        ++avtpToCan;
++        send(frame, "canOut");
++    }
++
++
++    virtual void finish() override
++    {
++        recordScalar("canToAvtp", canToAvtp);
++        recordScalar("avtpPdusSent", pdusSent);
++        recordScalar("avtpToCan", avtpToCan);
++        recordScalar("avtpPdusReceived", pdusReceived);
++        recordScalar("sequenceLost", sequenceLost);
++        recordScalar("sequenceOutOfOrder", sequenceOutOfOrder);
++        recordScalar("droppedMalformedPdus", droppedMalformedPdus);
++        recordScalar("droppedStreamId", droppedStreamId);
++        recordScalar("droppedBusId", droppedBusId);
++        recordScalar("droppedInvalidMessages", droppedInvalidMessages);
++        recordScalar("droppedRtr", droppedRtr);
++        recordScalar("unsupportedAcfMessages", unsupportedAcfMessages);
++        recordScalar("latePresentations", latePresentations);
++        recordScalar("droppedLate", droppedLate);
++        recordScalar("originTagMissing", originTagMissing);
++        recordScalar("ignoredOtherDestinations", ignoredOtherDestinations);
++        ApplicationBase::finish();
++    }
++
++  public:
++    virtual ~AvtpCanGatewayApp()
++    {
++        cancelAndDelete(flushTimer);
++        for (auto& entry : pending)
++            delete entry.frame;
++    }
++};
++
++Define_Module(AvtpCanGatewayApp);
++
++} // namespace SignalsAndGateways
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/AvtpCanGatewayApp.ned b/src-inet4/signalsandgateways/inet4/avtp/AvtpCanGatewayApp.ned
+new file mode 100644
+index 0000000..b5e51bf
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/AvtpCanGatewayApp.ned
+@@ -0,0 +1,81 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++package signalsandgateways.inet4.avtp;
++
++import inet.applications.contract.IApp;
++import inet.common.SimpleModule;
++
++//
++// CAN/CAN-FD gateway using IEEE 1722-2016 AVTP (EtherType 0x22F0).
++//
++// Talker (CAN -> Ethernet): each CAN data frame becomes an ACF CAN (0x01) or
++// ACF CAN Brief (0x02) message inside an NTSCF (subtype 0x82) or TSCF (0x05)
++// AVTPDU sent to destAddress. Up to maxAcfMessagesPerPdu frames are aggregated
++// per PDU; aggregationTimeout bounds how long the first frame waits.
++//
++// Listener (Ethernet -> CAN): joins listenAddress, decodes the received bytes,
++// checks subtype/version/sv/lengths, stream ID, sequence number and CAN field
++// consistency, and forwards valid frames to canOut. For TSCF with tv=1 frames are
++// released at the presentation time (avtp_timestamp); for NTSCF after
++// processingDelay. gPTP time is read from clockModule (ideal if unset).
++//
++// Plugs into the same host slot as CanEthernetApp (canIn/canOut gates).
++//
++simple AvtpCanGatewayApp extends SimpleModule like IApp
++{
++    parameters:
++        @class(AvtpCanGatewayApp);
++        @lifecycleSupport;
++        string interfaceTableModule;
++        string interface = default("eth0");
++        string clockModule = default(""); // gPTP clock, e.g. "^.clock" on a TsnDevice with hasTimeSynchronization; "" = simulation time
++        // talker
++        string format @enum("ntscf","tscf") = default("ntscf");
++        string acfMessageType @enum("can","canBrief") = default("can");
++        bool messageTimestampValid = default(true); // mtv; ignored for canBrief
++        string destAddress = default("");           // stream destination MAC, e.g. "91-E0-F0-00-FE-01"
++        string streamId = default("");              // 64-bit hex; default: interface MAC << 16 | streamUniqueId
++        int streamUniqueId = default(1);
++        int canBusId = default(0);                  // 5-bit can_bus_id written by the talker
++        int maxAcfMessagesPerPdu = default(1);
++        int maxPduBytes = default(1500);
++        double aggregationTimeout @unit(s) = default(0s);
++        double maxTransitTime @unit(s) = default(2ms); // TSCF presentation offset
++        // listener
++        string listenAddress = default("");         // stream MAC to receive; "" disables the listener
++        string listenStreamId = default("");        // accept only this stream ID; "" accepts any
++        int acceptCanBusId = default(-1);           // -1 accepts every can_bus_id
++        string latePresentationPolicy @enum("forward","drop") = default("forward");
++        // both directions
++        double processingDelay @unit(s) = default(5us);
++        double bitStuffingPercentage = default(0);
++        @display("i=block/app");
++        @signal[canToAvtp](type=omnetpp::cPacket);
++        @signal[avtpToCan](type=omnetpp::cPacket);
++        @signal[gatewayLatency](type=simtime_t);
++        @signal[acfMessagesPerPdu](type=long);
++        @signal[presentationLateness](type=simtime_t);
++        @signal[presentationSlack](type=simtime_t);
++        @signal[avtpPduLength](type=long);
++        @signal[presentationError](type=simtime_t);
++        @statistic[gatewayLatency](record=vector,stats);
++        @statistic[acfMessagesPerPdu](record=stats);
++        @statistic[presentationLateness](record=stats,vector);
++        @statistic[presentationSlack](record=stats); // presentation time - earliest possible release (>= 0)
++        @statistic[avtpPduLength](record=stats);
++        @statistic[presentationError](record=stats,vector); // listener release - talker's intended presentation instant
++    gates:
++        input socketIn;
++        output socketOut;
++        input canIn;
++        output canOut;
++}
++
++//
++// Deterministic codec checks: golden byte vectors, serializer round trips and
++// rejection of malformed PDUs. Results are recorded as scalars and logged.
++//
++simple AvtpCodecSelfTest extends SimpleModule
++{
++    parameters:
++        @class(AvtpCodecSelfTest);
++}
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/AvtpCodec.cc b/src-inet4/signalsandgateways/inet4/avtp/AvtpCodec.cc
+new file mode 100644
+index 0000000..ffe69aa
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/AvtpCodec.cc
+@@ -0,0 +1,166 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++#include "signalsandgateways/inet4/avtp/AvtpCodec.h"
++
++namespace SignalsAndGateways {
++namespace avtp {
++
++namespace {
++const uint8_t SUBTYPE_TSCF = 0x05;
++const uint8_t SUBTYPE_NTSCF = 0x82;
++const uint8_t TYPE_CAN = 0x01;
++const uint8_t TYPE_CAN_BRIEF = 0x02;
++
++uint16_t be16(const uint8_t *p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
++uint32_t be32(const uint8_t *p) { return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3]; }
++uint64_t be64(const uint8_t *p) { return (uint64_t(be32(p)) << 32) | be32(p + 4); }
++
++void decodeCan(const uint8_t *msg, DecodedAcfMessage& out)
++{
++    const bool brief = out.msgType == TYPE_CAN_BRIEF;
++    const size_t headerLength = brief ? 8 : 16;
++    if (out.length < headerLength) {
++        out.error = DecodeError::ACF_CAN_TOO_SHORT;
++        return;
++    }
++    auto& can = out.can;
++    can.msgType = out.msgType;
++    const uint8_t flags = msg[2];
++    const uint8_t pad = flags >> 6;
++    can.mtv = flags & 0x20;
++    can.rtr = flags & 0x10;
++    can.eff = flags & 0x08;
++    can.brs = flags & 0x04;
++    can.fdf = flags & 0x02;
++    can.esi = flags & 0x01;
++    can.canBusId = msg[3] & 0x1f;
++    if (!brief)
++        can.messageTimestamp = be64(msg + 4);
++    can.canIdentifier = be32(msg + headerLength - 4) & 0x1fffffffU;
++    if (pad > out.length - headerLength) {
++        out.error = DecodeError::ACF_CAN_PAD_EXCEEDS_PAYLOAD;
++        return;
++    }
++    const size_t payloadLength = out.length - headerLength - pad;
++    can.payload.assign(msg + headerLength, msg + headerLength + payloadLength);
++    if (brief && can.mtv)
++        out.error = DecodeError::CAN_BRIEF_WITH_MTV;
++    else if (!can.eff && can.canIdentifier > 0x7ffU)
++        out.error = DecodeError::CAN_ID_OUT_OF_RANGE;
++    else if (can.brs && !can.fdf)
++        out.error = DecodeError::CAN_BRS_WITHOUT_FDF;
++    else if (can.esi && !can.fdf)
++        out.error = DecodeError::CAN_ESI_WITHOUT_FDF;
++    else if (can.rtr && can.fdf)
++        out.error = DecodeError::CAN_FD_RTR;
++    else if (!isValidCanPayloadLength(payloadLength, can.fdf))
++        out.error = DecodeError::CAN_PAYLOAD_LENGTH_INVALID;
++}
++} // namespace
++
++const char *toString(DecodeError error)
++{
++    switch (error) {
++        case DecodeError::NONE: return "none";
++        case DecodeError::PDU_TOO_SHORT: return "pdu-too-short";
++        case DecodeError::UNSUPPORTED_SUBTYPE: return "unsupported-subtype";
++        case DecodeError::UNSUPPORTED_VERSION: return "unsupported-version";
++        case DecodeError::STREAM_ID_NOT_VALID: return "stream-id-not-valid";
++        case DecodeError::DATA_LENGTH_EXCEEDS_PDU: return "data-length-exceeds-pdu";
++        case DecodeError::ACF_TRUNCATED: return "acf-truncated";
++        case DecodeError::ACF_LENGTH_ZERO: return "acf-length-zero";
++        case DecodeError::ACF_CAN_TOO_SHORT: return "acf-can-too-short";
++        case DecodeError::ACF_CAN_PAD_EXCEEDS_PAYLOAD: return "acf-can-pad-exceeds-payload";
++        case DecodeError::CAN_ID_OUT_OF_RANGE: return "can-id-out-of-range";
++        case DecodeError::CAN_PAYLOAD_LENGTH_INVALID: return "can-payload-length-invalid";
++        case DecodeError::CAN_BRS_WITHOUT_FDF: return "can-brs-without-fdf";
++        case DecodeError::CAN_ESI_WITHOUT_FDF: return "can-esi-without-fdf";
++        case DecodeError::CAN_FD_RTR: return "can-fd-rtr";
++        case DecodeError::CAN_BRIEF_WITH_MTV: return "can-brief-with-mtv";
++    }
++    return "unknown";
++}
++
++bool isValidCanPayloadLength(size_t length, bool fdf)
++{
++    if (length <= 8)
++        return true;
++    if (!fdf)
++        return false;
++    return length == 12 || length == 16 || length == 20 || length == 24
++            || length == 32 || length == 48 || length == 64;
++}
++
++DecodedPdu decodePdu(const uint8_t *data, size_t size)
++{
++    DecodedPdu pdu;
++    if (size < 12) {
++        pdu.error = DecodeError::PDU_TOO_SHORT;
++        return pdu;
++    }
++    pdu.subtype = data[0];
++    const bool sv = data[1] & 0x80;
++    const uint8_t version = (data[1] >> 4) & 0x07;
++    if (pdu.subtype == SUBTYPE_NTSCF) {
++        pdu.headerLength = 12;
++        pdu.dataLength = ((data[1] & 0x07) << 8) | data[2];
++        pdu.sequenceNum = data[3];
++        pdu.streamId = be64(data + 4);
++    }
++    else if (pdu.subtype == SUBTYPE_TSCF) {
++        if (size < 24) {
++            pdu.error = DecodeError::PDU_TOO_SHORT;
++            return pdu;
++        }
++        pdu.headerLength = 24;
++        pdu.tv = data[1] & 0x01;
++        pdu.sequenceNum = data[2];
++        pdu.streamId = be64(data + 4);
++        pdu.avtpTimestamp = be32(data + 12);
++        pdu.dataLength = be16(data + 20);
++    }
++    else {
++        pdu.error = DecodeError::UNSUPPORTED_SUBTYPE;
++        return pdu;
++    }
++    if (version != 0) {
++        pdu.error = DecodeError::UNSUPPORTED_VERSION;
++        return pdu;
++    }
++    if (!sv) {
++        pdu.error = DecodeError::STREAM_ID_NOT_VALID;
++        return pdu;
++    }
++    if (pdu.headerLength + pdu.dataLength > size) {
++        pdu.error = DecodeError::DATA_LENGTH_EXCEEDS_PDU;
++        return pdu;
++    }
++    size_t offset = pdu.headerLength;
++    const size_t end = pdu.headerLength + pdu.dataLength;
++    while (offset < end) {
++        if (end - offset < 2) {
++            pdu.error = DecodeError::ACF_TRUNCATED;
++            return pdu;
++        }
++        DecodedAcfMessage message;
++        message.offset = offset;
++        message.msgType = data[offset] >> 1;
++        message.length = (((data[offset] & 0x01) << 8) | data[offset + 1]) * 4;
++        if (message.length == 0) {
++            pdu.error = DecodeError::ACF_LENGTH_ZERO;
++            return pdu;
++        }
++        if (message.length > end - offset) {
++            pdu.error = DecodeError::ACF_TRUNCATED;
++            return pdu;
++        }
++        message.isCan = message.msgType == TYPE_CAN || message.msgType == TYPE_CAN_BRIEF;
++        if (message.isCan)
++            decodeCan(data + offset, message);
++        pdu.messages.push_back(std::move(message));
++        offset += pdu.messages.back().length;
++    }
++    return pdu;
++}
++
++} // namespace avtp
++} // namespace SignalsAndGateways
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/AvtpCodec.h b/src-inet4/signalsandgateways/inet4/avtp/AvtpCodec.h
+new file mode 100644
+index 0000000..9c35159
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/AvtpCodec.h
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// Validating byte-level decoder for IEEE 1722-2016 NTSCF/TSCF PDUs carrying
++// ACF CAN / ACF CAN Brief messages. Independent of the chunk serializers so the
++// receiver checks what is actually on the wire.
++#ifndef SIGNALSANDGATEWAYS_AVTPCODEC_H_
++#define SIGNALSANDGATEWAYS_AVTPCODEC_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++namespace SignalsAndGateways {
++namespace avtp {
++
++enum class DecodeError {
++    NONE,
++    // PDU-level errors: the whole PDU is discarded.
++    PDU_TOO_SHORT,
++    UNSUPPORTED_SUBTYPE,
++    UNSUPPORTED_VERSION,
++    STREAM_ID_NOT_VALID,
++    DATA_LENGTH_EXCEEDS_PDU,
++    ACF_TRUNCATED,
++    ACF_LENGTH_ZERO,
++    // Message-level errors: only the affected ACF message is discarded.
++    ACF_CAN_TOO_SHORT,
++    ACF_CAN_PAD_EXCEEDS_PAYLOAD,
++    CAN_ID_OUT_OF_RANGE,
++    CAN_PAYLOAD_LENGTH_INVALID,
++    CAN_BRS_WITHOUT_FDF,
++    CAN_ESI_WITHOUT_FDF,
++    CAN_FD_RTR,
++    CAN_BRIEF_WITH_MTV,
++};
++
++const char *toString(DecodeError error);
++
++struct AcfCanFields {
++    uint8_t msgType = 0;
++    bool mtv = false, rtr = false, eff = false, brs = false, fdf = false, esi = false;
++    uint8_t canBusId = 0;
++    uint64_t messageTimestamp = 0;
++    uint32_t canIdentifier = 0;
++    std::vector<uint8_t> payload;
++};
++
++struct DecodedAcfMessage {
++    size_t offset = 0;      // byte offset from the start of the AVTPDU
++    size_t length = 0;      // acf_msg_length * 4
++    uint8_t msgType = 0;
++    bool isCan = false;     // ACF CAN or ACF CAN Brief
++    DecodeError error = DecodeError::NONE;
++    AcfCanFields can;
++};
++
++struct DecodedPdu {
++    DecodeError error = DecodeError::NONE;
++    uint8_t subtype = 0;
++    uint8_t sequenceNum = 0;
++    uint64_t streamId = 0;
++    bool tv = false;
++    uint32_t avtpTimestamp = 0;
++    size_t headerLength = 0;
++    size_t dataLength = 0;  // ntscf_data_length or stream_data_length
++    std::vector<DecodedAcfMessage> messages;
++};
++
++// Decodes one AVTPDU. Trailing bytes beyond the declared data length (e.g. Ethernet
++// minimum-frame padding) are ignored as required by IEEE 1722.
++DecodedPdu decodePdu(const uint8_t *data, size_t size);
++inline DecodedPdu decodePdu(const std::vector<uint8_t>& bytes) { return decodePdu(bytes.data(), bytes.size()); }
++
++// Valid payload length for a CAN (FD) frame carried in ACF.
++bool isValidCanPayloadLength(size_t length, bool fdf);
++
++} // namespace avtp
++} // namespace SignalsAndGateways
++
++#endif
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/AvtpCodecSelfTest.cc b/src-inet4/signalsandgateways/inet4/avtp/AvtpCodecSelfTest.cc
+new file mode 100644
+index 0000000..8c31a2f
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/AvtpCodecSelfTest.cc
+@@ -0,0 +1,325 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// Golden vectors were derived by hand from the IEEE 1722-2016 field tables
++// (cross-checked with COVESA Open1722); they are independent of the serializer code.
++#include <functional>
++#include <string>
++#include <vector>
++
++#include "inet/common/packet/Packet.h"
++#include "inet/common/packet/chunk/BytesChunk.h"
++#include "signalsandgateways/inet4/avtp/Avtp_m.h"
++#include "signalsandgateways/inet4/avtp/AvtpCodec.h"
++
++using namespace omnetpp;
++using namespace inet;
++
++namespace SignalsAndGateways {
++
++using Bytes = std::vector<uint8_t>;
++using avtp::DecodeError;
++
++class AvtpCodecSelfTest : public cSimpleModule
++{
++    int passed = 0, failed = 0;
++
++    void check(const std::string& name, bool condition)
++    {
++        if (condition)
++            ++passed;
++        else
++            ++failed;
++        EV_INFO << "CHECK " << name << (condition ? " PASS" : " FAIL") << endl;
++        if (!condition)
++            std::cout << "AVTP self-test FAILED: " << name << endl;
++    }
++
++    static Bytes serialize(const std::vector<Ptr<const Chunk>>& chunks)
++    {
++        Packet packet("golden");
++        for (const auto& chunk : chunks)
++            packet.insertAtBack(chunk);
++        return packet.peekAllAsBytes()->getBytes();
++    }
++
++    static Bytes payload(int length, int first)
++    {
++        Bytes bytes;
++        for (int i = 0; i < length; ++i)
++            bytes.push_back(static_cast<uint8_t>(first + i));
++        return bytes;
++    }
++
++    static Ptr<AcfCanMessage> canMessage(uint8_t type, int pad, bool mtv, bool eff, bool brs, bool fdf,
++                                         uint8_t bus, uint64_t timestamp, uint32_t id, const Bytes& data)
++    {
++        const size_t header = type == ACF_MSG_TYPE_CAN_BRIEF ? ACF_CAN_BRIEF_HEADER_BYTES : ACF_CAN_HEADER_BYTES;
++        const size_t total = header + data.size() + pad;
++        auto message = makeShared<AcfCanMessage>();
++        message->setAcfMsgType(type);
++        message->setAcfMsgLength(total / 4);
++        message->setPad(pad);
++        message->setMtv(mtv);
++        message->setEff(eff);
++        message->setBrs(brs);
++        message->setFdf(fdf);
++        message->setCanBusId(bus);
++        message->setMessageTimestamp(timestamp);
++        message->setCanIdentifier(id);
++        message->setPayloadArraySize(data.size());
++        for (size_t i = 0; i < data.size(); ++i)
++            message->setPayload(i, data[i]);
++        message->setChunkLength(B(total));
++        return message;
++    }
++
++    // NTSCF, stream 0x0200000000010001, seq 5; ACF CAN, bus 1, mtv, ts 10 ms, id 0x100, 8 bytes.
++    static Bytes goldenNtscfCan()
++    {
++        Bytes bytes = {0x82, 0x80, 0x18, 0x05, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
++                       0x02, 0x06, 0x20, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x98, 0x96, 0x80,
++                       0x00, 0x00, 0x01, 0x00};
++        Bytes data = payload(8, 0);
++        bytes.insert(bytes.end(), data.begin(), data.end());
++        return bytes;
++    }
++
++    // TSCF, tv, seq 0xff, ts 0x12345678; ACF CAN Brief, bus 3, EFF id 0x1abcde, FD+BRS, 12 bytes.
++    static Bytes goldenTscfBrief()
++    {
++        Bytes bytes = {0x05, 0x81, 0xff, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x07,
++                       0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00,
++                       0x04, 0x05, 0x0e, 0x03, 0x00, 0x1a, 0xbc, 0xde};
++        Bytes data = payload(12, 0x40);
++        bytes.insert(bytes.end(), data.begin(), data.end());
++        return bytes;
++    }
++
++    // NTSCF seq 0; ACF CAN Brief, 5-byte classical payload => 3 pad bytes (pad=3).
++    static Bytes goldenPadded()
++    {
++        return {0x82, 0x80, 0x10, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
++                0x04, 0x04, 0xc0, 0x00, 0x00, 0x00, 0x07, 0xff,
++                0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0x00, 0x00, 0x00};
++    }
++
++    // NTSCF seq 1; ACF CAN, FD without BRS, EFF id 0x1fffffff, bus 0, mtv=0, 16 bytes.
++    // Distinguishes FDF (0x02) from BRS (0x04) and exercises all 29 identifier bits.
++    static Bytes goldenFdNoBrs()
++    {
++        Bytes bytes = {0x82, 0x80, 0x20, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
++                       0x02, 0x08, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++                       0x1f, 0xff, 0xff, 0xff};
++        Bytes data = payload(16, 0x80);
++        bytes.insert(bytes.end(), data.begin(), data.end());
++        return bytes;
++    }
++
++    // TSCF with mr=1, tv=0, tu=1, seq 0x42, stream 0xffeeddccbbaa9988, ts 0xdeadbeef;
++    // ACF CAN Brief with only RTR and ESI set, bus 31, id 0x123, no payload.
++    // Sets every remaining single-bit flag so that bit-position errors are visible.
++    static Bytes goldenFlagBits()
++    {
++        return {0x05, 0x88, 0x42, 0x01, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88,
++                0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
++                0x04, 0x02, 0x11, 0x1f, 0x00, 0x00, 0x01, 0x23};
++    }
++
++    void checkEncoding()
++    {
++        auto ntscf = makeShared<AvtpNtscfHeader>();
++        ntscf->setSequenceNum(5);
++        ntscf->setStreamId(0x0200000000010001ULL);
++        ntscf->setNtscfDataLength(24);
++        auto can = canMessage(ACF_MSG_TYPE_CAN, 0, true, false, false, false, 1, 10000000ULL, 0x100, payload(8, 0));
++        check("encode-ntscf-acf-can-golden", serialize({ntscf, can}) == goldenNtscfCan());
++
++        auto tscf = makeShared<AvtpTscfHeader>();
++        tscf->setSequenceNum(0xff);
++        tscf->setStreamId(0x0200000000020007ULL);
++        tscf->setTv(true);
++        tscf->setAvtpTimestamp(0x12345678);
++        tscf->setStreamDataLength(20);
++        auto brief = canMessage(ACF_MSG_TYPE_CAN_BRIEF, 0, false, true, true, true, 3, 0, 0x1abcde, payload(12, 0x40));
++        check("encode-tscf-acf-can-brief-golden", serialize({tscf, brief}) == goldenTscfBrief());
++
++        auto padded = makeShared<AvtpNtscfHeader>();
++        padded->setSequenceNum(0);
++        padded->setStreamId(0x0200000000010001ULL);
++        padded->setNtscfDataLength(16);
++        auto classic = canMessage(ACF_MSG_TYPE_CAN_BRIEF, 3, false, false, false, false, 0, 0, 0x7ff, {0xa0, 0xa1, 0xa2, 0xa3, 0xa4});
++        check("encode-acf-pad-golden", serialize({padded, classic}) == goldenPadded());
++
++        auto fdHeader = makeShared<AvtpNtscfHeader>();
++        fdHeader->setSequenceNum(1);
++        fdHeader->setStreamId(0x0200000000010001ULL);
++        fdHeader->setNtscfDataLength(32);
++        auto fd = canMessage(ACF_MSG_TYPE_CAN, 0, false, true, false, true, 0, 0, 0x1fffffff, payload(16, 0x80));
++        check("encode-fd-without-brs-golden", serialize({fdHeader, fd}) == goldenFdNoBrs());
++
++        auto flagsHeader = makeShared<AvtpTscfHeader>();
++        flagsHeader->setMr(true);
++        flagsHeader->setTv(false);
++        flagsHeader->setTu(true);
++        flagsHeader->setSequenceNum(0x42);
++        flagsHeader->setStreamId(0xffeeddccbbaa9988ULL);
++        flagsHeader->setAvtpTimestamp(0xdeadbeef);
++        flagsHeader->setStreamDataLength(8);
++        auto flags = canMessage(ACF_MSG_TYPE_CAN_BRIEF, 0, false, false, false, false, 31, 0, 0x123, {});
++        flags->setRtr(true);
++        flags->setEsi(true);
++        check("encode-remaining-flag-bits-golden", serialize({flagsHeader, flags}) == goldenFlagBits());
++    }
++
++    void checkInetDeserialization()
++    {
++        Packet packet("rx", makeShared<BytesChunk>(goldenTscfBrief()));
++        const auto& header = packet.popAtFront<AvtpTscfHeader>();
++        const auto& message = packet.popAtFront<AcfCanMessage>();
++        bool ok = header->getSubtype() == AVTP_SUBTYPE_TSCF && header->getSv() && header->getTv()
++                && header->getSequenceNum() == 0xff && header->getStreamId() == 0x0200000000020007ULL
++                && header->getAvtpTimestamp() == 0x12345678 && header->getStreamDataLength() == 20
++                && message->getAcfMsgType() == ACF_MSG_TYPE_CAN_BRIEF && message->getAcfMsgLength() == 5
++                && message->getEff() && message->getBrs() && message->getFdf() && !message->getMtv()
++                && message->getCanBusId() == 3 && message->getCanIdentifier() == 0x1abcde
++                && message->getPayloadArraySize() == 12 && message->getPayload(11) == 0x4b
++                && packet.getDataLength() == b(0);
++        check("inet-deserialize-tscf-brief", ok);
++
++        Packet flagPacket("rx", makeShared<BytesChunk>(goldenFlagBits()));
++        const auto& flagHeader = flagPacket.popAtFront<AvtpTscfHeader>();
++        const auto& flagMessage = flagPacket.popAtFront<AcfCanMessage>();
++        ok = flagHeader->getMr() && !flagHeader->getTv() && flagHeader->getTu()
++                && flagHeader->getStreamId() == 0xffeeddccbbaa9988ULL && flagHeader->getAvtpTimestamp() == 0xdeadbeef
++                && flagMessage->getRtr() && flagMessage->getEsi() && !flagMessage->getEff() && !flagMessage->getBrs()
++                && !flagMessage->getFdf() && !flagMessage->getMtv() && flagMessage->getCanBusId() == 31
++                && flagMessage->getCanIdentifier() == 0x123 && flagMessage->getPayloadArraySize() == 0;
++        check("inet-deserialize-remaining-flag-bits", ok);
++
++        Packet fdPacket("rx", makeShared<BytesChunk>(goldenFdNoBrs()));
++        fdPacket.popAtFront<AvtpNtscfHeader>();
++        const auto& fdMessage = fdPacket.popAtFront<AcfCanMessage>();
++        check("inet-deserialize-fd-without-brs", fdMessage->getFdf() && !fdMessage->getBrs() && fdMessage->getEff()
++                && fdMessage->getCanIdentifier() == 0x1fffffff && fdMessage->getPayloadArraySize() == 16);
++    }
++
++    void checkDecoding()
++    {
++        auto pdu = avtp::decodePdu(goldenNtscfCan());
++        bool ok = pdu.error == DecodeError::NONE && pdu.subtype == AVTP_SUBTYPE_NTSCF && pdu.sequenceNum == 5
++                && pdu.streamId == 0x0200000000010001ULL && pdu.dataLength == 24 && pdu.messages.size() == 1
++                && pdu.messages[0].isCan && pdu.messages[0].error == DecodeError::NONE
++                && pdu.messages[0].can.mtv && pdu.messages[0].can.messageTimestamp == 10000000ULL
++                && pdu.messages[0].can.canBusId == 1 && pdu.messages[0].can.canIdentifier == 0x100
++                && pdu.messages[0].can.payload == payload(8, 0);
++        check("decode-ntscf-acf-can", ok);
++
++        pdu = avtp::decodePdu(goldenTscfBrief());
++        ok = pdu.error == DecodeError::NONE && pdu.subtype == AVTP_SUBTYPE_TSCF && pdu.tv
++                && pdu.avtpTimestamp == 0x12345678 && pdu.messages.size() == 1
++                && pdu.messages[0].can.fdf && pdu.messages[0].can.brs && pdu.messages[0].can.eff
++                && pdu.messages[0].can.canIdentifier == 0x1abcde && pdu.messages[0].can.payload == payload(12, 0x40);
++        check("decode-tscf-acf-can-brief", ok);
++
++        pdu = avtp::decodePdu(goldenFdNoBrs());
++        check("decode-fd-without-brs", pdu.error == DecodeError::NONE && pdu.messages.size() == 1
++                && pdu.messages[0].error == DecodeError::NONE && pdu.messages[0].can.fdf && !pdu.messages[0].can.brs
++                && pdu.messages[0].can.eff && pdu.messages[0].can.canIdentifier == 0x1fffffff
++                && !pdu.messages[0].can.mtv && pdu.messages[0].can.payload == payload(16, 0x80));
++
++        pdu = avtp::decodePdu(goldenFlagBits());
++        check("decode-remaining-flag-bits", pdu.error == DecodeError::NONE && !pdu.tv && pdu.sequenceNum == 0x42
++                && pdu.messages.size() == 1 && pdu.messages[0].can.rtr && pdu.messages[0].can.esi
++                && pdu.messages[0].can.canBusId == 31 && pdu.messages[0].error == DecodeError::CAN_ESI_WITHOUT_FDF);
++
++        pdu = avtp::decodePdu(goldenPadded());
++        check("decode-pad-removed", pdu.error == DecodeError::NONE && pdu.messages.size() == 1
++                && pdu.messages[0].can.payload == Bytes({0xa0, 0xa1, 0xa2, 0xa3, 0xa4}));
++
++        Bytes withEthernetPadding = goldenNtscfCan();
++        withEthernetPadding.resize(withEthernetPadding.size() + 10, 0);
++        pdu = avtp::decodePdu(withEthernetPadding);
++        check("decode-ignores-ethernet-padding", pdu.error == DecodeError::NONE && pdu.messages.size() == 1);
++
++        // Two ACF CAN messages plus one unknown ACF type (0x7f, 1 quadlet) in one NTSCF PDU.
++        Bytes multi = goldenNtscfCan();
++        Bytes second(multi.begin() + 12, multi.end());
++        second[27 - 12] = 0x55;  // different CAN identifier low byte
++        multi.insert(multi.end(), second.begin(), second.end());
++        multi.insert(multi.end(), {0xfe, 0x01, 0x00, 0x00});
++        multi[2] = 24 + 24 + 4;
++        pdu = avtp::decodePdu(multi);
++        ok = pdu.error == DecodeError::NONE && pdu.messages.size() == 3
++                && pdu.messages[0].isCan && pdu.messages[1].isCan && !pdu.messages[2].isCan
++                && pdu.messages[1].offset == 36 && pdu.messages[1].can.canIdentifier == 0x155
++                && pdu.messages[2].msgType == 0x7f;
++        check("decode-multiple-and-unknown-acf", ok);
++    }
++
++    void expectPduError(const std::string& name, Bytes bytes, DecodeError expected)
++    {
++        auto pdu = avtp::decodePdu(bytes);
++        if (pdu.error != expected)
++            EV_INFO << name << ": got " << avtp::toString(pdu.error) << endl;
++        check(name, pdu.error == expected);
++    }
++
++    void expectMessageError(const std::string& name, Bytes bytes, DecodeError expected)
++    {
++        auto pdu = avtp::decodePdu(bytes);
++        bool ok = pdu.error == DecodeError::NONE && pdu.messages.size() == 1 && pdu.messages[0].error == expected;
++        if (!ok)
++            EV_INFO << name << ": got " << avtp::toString(pdu.error) << "/"
++                    << (pdu.messages.empty() ? "no message" : avtp::toString(pdu.messages[0].error)) << endl;
++        check(name, ok);
++    }
++
++    void checkRejection()
++    {
++        const Bytes good = goldenNtscfCan();
++        auto mutate = [&](std::function<void(Bytes&)> change) { Bytes b = good; change(b); return b; };
++        expectPduError("reject-short-pdu", Bytes(good.begin(), good.begin() + 11), DecodeError::PDU_TOO_SHORT);
++        const Bytes tscf = goldenTscfBrief();
++        expectPduError("reject-short-tscf", Bytes(tscf.begin(), tscf.begin() + 20), DecodeError::PDU_TOO_SHORT);
++        expectPduError("reject-unknown-subtype", mutate([](Bytes& b) { b[0] = 0x02; }), DecodeError::UNSUPPORTED_SUBTYPE);
++        expectPduError("reject-version-1", mutate([](Bytes& b) { b[1] |= 0x10; }), DecodeError::UNSUPPORTED_VERSION);
++        expectPduError("reject-sv-0", mutate([](Bytes& b) { b[1] &= 0x7f; }), DecodeError::STREAM_ID_NOT_VALID);
++        expectPduError("reject-data-length-overrun", mutate([](Bytes& b) { b[1] |= 0x07; b[2] = 0xff; }), DecodeError::DATA_LENGTH_EXCEEDS_PDU);
++        expectPduError("reject-acf-length-zero", mutate([](Bytes& b) { b[12] = 0x02; b[13] = 0x00; }), DecodeError::ACF_LENGTH_ZERO);
++        expectPduError("reject-acf-overrun", mutate([](Bytes& b) { b[13] = 0x07; }), DecodeError::ACF_TRUNCATED);
++        expectPduError("reject-acf-trailing-byte", mutate([](Bytes& b) { b[2] = 25; b.push_back(0); }), DecodeError::ACF_TRUNCATED);
++        expectMessageError("reject-acf-can-too-short", mutate([](Bytes& b) { b[2] = 12; b[13] = 0x03; b.resize(24); }), DecodeError::ACF_CAN_TOO_SHORT);
++        expectMessageError("reject-11bit-id-range", mutate([](Bytes& b) { b[26] = 0x08; b[27] = 0x00; }), DecodeError::CAN_ID_OUT_OF_RANGE);
++        expectMessageError("reject-brs-without-fdf", mutate([](Bytes& b) { b[14] |= 0x04; }), DecodeError::CAN_BRS_WITHOUT_FDF);
++        expectMessageError("reject-esi-without-fdf", mutate([](Bytes& b) { b[14] |= 0x01; }), DecodeError::CAN_ESI_WITHOUT_FDF);
++        expectMessageError("reject-fd-rtr", mutate([](Bytes& b) { b[14] |= 0x12; }), DecodeError::CAN_FD_RTR);
++        // 12 payload bytes without FDF: classical CAN carries at most 8.
++        expectMessageError("reject-classic-12-bytes", mutate([](Bytes& b) { b[2] = 28; b[13] = 0x07; b.resize(12 + 28, 0x33); }),
++                           DecodeError::CAN_PAYLOAD_LENGTH_INVALID);
++        // FD with 9 payload bytes (pad=3 in a 7-quadlet message): not a legal FD length.
++        expectMessageError("reject-fd-9-bytes", mutate([](Bytes& b) { b[2] = 28; b[13] = 0x07; b[14] = 0xc2; b.resize(12 + 28, 0); }),
++                           DecodeError::CAN_PAYLOAD_LENGTH_INVALID);
++        Bytes briefMtv = goldenTscfBrief();
++        briefMtv[26] |= 0x20;
++        expectMessageError("reject-brief-with-mtv", briefMtv, DecodeError::CAN_BRIEF_WITH_MTV);
++        expectMessageError("accept-29bit-id-with-eff", mutate([](Bytes& b) { b[14] |= 0x08; b[24] = 0x1f; b[25] = 0xff; b[26] = 0xff; b[27] = 0xff; }),
++                           DecodeError::NONE);
++    }
++
++    virtual void initialize() override
++    {
++        checkEncoding();
++        checkInetDeserialization();
++        checkDecoding();
++        checkRejection();
++        recordScalar("checksPassed", passed);
++        recordScalar("checksFailed", failed);
++        std::cout << "AVTP self-test: " << passed << " passed, " << failed << " failed" << endl;
++    }
++
++    virtual void handleMessage(cMessage *message) override { delete message; }
++};
++
++Define_Module(AvtpCodecSelfTest);
++
++} // namespace SignalsAndGateways
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/AvtpSerializer.cc b/src-inet4/signalsandgateways/inet4/avtp/AvtpSerializer.cc
+new file mode 100644
+index 0000000..fca71c5
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/AvtpSerializer.cc
+@@ -0,0 +1,145 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// Byte-exact serializers for the IEEE 1722 chunks in Avtp.msg (network byte order).
++#include "inet/common/packet/serializer/ChunkSerializerRegistry.h"
++#include "inet/common/packet/serializer/FieldsChunkSerializer.h"
++#include "signalsandgateways/inet4/avtp/Avtp_m.h"
++
++using namespace inet;
++
++namespace SignalsAndGateways {
++
++class AvtpNtscfHeaderSerializer : public FieldsChunkSerializer
++{
++  protected:
++    virtual void serialize(MemoryOutputStream& stream, const Ptr<const Chunk>& chunk) const override
++    {
++        const auto& header = staticPtrCast<const AvtpNtscfHeader>(chunk);
++        if (header->getNtscfDataLength() > 0x7ff)
++            throw cRuntimeError("ntscf_data_length %u exceeds 11 bits", header->getNtscfDataLength());
++        stream.writeUint8(header->getSubtype());
++        stream.writeUint16Be((header->getSv() ? 0x8000 : 0) | ((header->getVersion() & 0x07) << 12)
++                             | (header->getNtscfDataLength() & 0x7ff));
++        stream.writeUint8(header->getSequenceNum());
++        stream.writeUint64Be(header->getStreamId());
++    }
++
++    virtual const Ptr<Chunk> deserialize(MemoryInputStream& stream) const override
++    {
++        auto header = makeShared<AvtpNtscfHeader>();
++        header->setSubtype(stream.readUint8());
++        uint16_t word = stream.readUint16Be();
++        header->setSv(word & 0x8000);
++        header->setVersion((word >> 12) & 0x07);
++        header->setNtscfDataLength(word & 0x7ff);
++        header->setSequenceNum(stream.readUint8());
++        header->setStreamId(stream.readUint64Be());
++        return header;
++    }
++};
++
++class AvtpTscfHeaderSerializer : public FieldsChunkSerializer
++{
++  protected:
++    virtual void serialize(MemoryOutputStream& stream, const Ptr<const Chunk>& chunk) const override
++    {
++        const auto& header = staticPtrCast<const AvtpTscfHeader>(chunk);
++        stream.writeUint8(header->getSubtype());
++        stream.writeUint8((header->getSv() ? 0x80 : 0) | ((header->getVersion() & 0x07) << 4)
++                          | (header->getMr() ? 0x08 : 0) | (header->getTv() ? 0x01 : 0));
++        stream.writeUint8(header->getSequenceNum());
++        stream.writeUint8(header->getTu() ? 0x01 : 0);
++        stream.writeUint64Be(header->getStreamId());
++        stream.writeUint32Be(header->getAvtpTimestamp());
++        stream.writeUint32Be(0);
++        stream.writeUint16Be(header->getStreamDataLength());
++        stream.writeUint16Be(0);
++    }
++
++    virtual const Ptr<Chunk> deserialize(MemoryInputStream& stream) const override
++    {
++        auto header = makeShared<AvtpTscfHeader>();
++        header->setSubtype(stream.readUint8());
++        uint8_t flags = stream.readUint8();
++        header->setSv(flags & 0x80);
++        header->setVersion((flags >> 4) & 0x07);
++        header->setMr(flags & 0x08);
++        header->setTv(flags & 0x01);
++        header->setSequenceNum(stream.readUint8());
++        header->setTu(stream.readUint8() & 0x01);
++        header->setStreamId(stream.readUint64Be());
++        header->setAvtpTimestamp(stream.readUint32Be());
++        stream.readUint32Be();
++        header->setStreamDataLength(stream.readUint16Be());
++        stream.readUint16Be();
++        return header;
++    }
++};
++
++class AcfCanMessageSerializer : public FieldsChunkSerializer
++{
++  protected:
++    virtual void serialize(MemoryOutputStream& stream, const Ptr<const Chunk>& chunk) const override
++    {
++        const auto& message = staticPtrCast<const AcfCanMessage>(chunk);
++        const bool brief = message->getAcfMsgType() == ACF_MSG_TYPE_CAN_BRIEF;
++        const size_t headerLength = brief ? ACF_CAN_BRIEF_HEADER_BYTES : ACF_CAN_HEADER_BYTES;
++        const size_t total = headerLength + message->getPayloadArraySize() + message->getPad();
++        if (message->getAcfMsgLength() > 0x1ff || total != message->getAcfMsgLength() * 4u || total % 4 != 0)
++            throw cRuntimeError("ACF CAN message length/pad is inconsistent with its payload");
++        stream.writeUint16Be(((message->getAcfMsgType() & 0x7f) << 9) | (message->getAcfMsgLength() & 0x1ff));
++        stream.writeUint8(((message->getPad() & 0x03) << 6) | (message->getMtv() ? 0x20 : 0)
++                          | (message->getRtr() ? 0x10 : 0) | (message->getEff() ? 0x08 : 0)
++                          | (message->getBrs() ? 0x04 : 0) | (message->getFdf() ? 0x02 : 0)
++                          | (message->getEsi() ? 0x01 : 0));
++        stream.writeUint8(message->getCanBusId() & 0x1f);
++        if (!brief)
++            stream.writeUint64Be(message->getMessageTimestamp());
++        stream.writeUint32Be(message->getCanIdentifier() & 0x1fffffffU);
++        for (size_t i = 0; i < message->getPayloadArraySize(); ++i)
++            stream.writeUint8(message->getPayload(i));
++        stream.writeByteRepeatedly(0, message->getPad());
++    }
++
++    virtual const Ptr<Chunk> deserialize(MemoryInputStream& stream) const override
++    {
++        auto message = makeShared<AcfCanMessage>();
++        uint16_t word = stream.readUint16Be();
++        message->setAcfMsgType(word >> 9);
++        message->setAcfMsgLength(word & 0x1ff);
++        uint8_t flags = stream.readUint8();
++        message->setPad(flags >> 6);
++        message->setMtv(flags & 0x20);
++        message->setRtr(flags & 0x10);
++        message->setEff(flags & 0x08);
++        message->setBrs(flags & 0x04);
++        message->setFdf(flags & 0x02);
++        message->setEsi(flags & 0x01);
++        message->setCanBusId(stream.readUint8() & 0x1f);
++        const bool brief = message->getAcfMsgType() == ACF_MSG_TYPE_CAN_BRIEF;
++        const size_t headerLength = brief ? ACF_CAN_BRIEF_HEADER_BYTES : ACF_CAN_HEADER_BYTES;
++        if (!brief)
++            message->setMessageTimestamp(stream.readUint64Be());
++        message->setCanIdentifier(stream.readUint32Be() & 0x1fffffffU);
++        const size_t total = message->getAcfMsgLength() * 4u;
++        if (total < headerLength + message->getPad()) {
++            message->markIncorrect();
++            message->setChunkLength(B(headerLength));
++            return message;
++        }
++        const size_t payloadLength = total - headerLength - message->getPad();
++        message->setPayloadArraySize(payloadLength);
++        for (size_t i = 0; i < payloadLength; ++i)
++            message->setPayload(i, stream.readUint8());
++        for (size_t i = 0; i < message->getPad(); ++i)
++            stream.readUint8();
++        message->setChunkLength(B(total));
++        return message;
++    }
++};
++
++Register_Serializer(AvtpNtscfHeader, AvtpNtscfHeaderSerializer);
++Register_Serializer(AvtpTscfHeader, AvtpTscfHeaderSerializer);
++Register_Serializer(AcfCanMessage, AcfCanMessageSerializer);
++
++} // namespace SignalsAndGateways
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/package.ned b/src-inet4/signalsandgateways/inet4/avtp/package.ned
+new file mode 100644
+index 0000000..d3c4e13
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/package.ned
+@@ -0,0 +1 @@
++package signalsandgateways.inet4.avtp;
 diff --git a/src-inet4/signalsandgateways/inet4/package.ned b/src-inet4/signalsandgateways/inet4/package.ned
 new file mode 100644
 index 0000000..5d935df
