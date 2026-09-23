@@ -1,0 +1,291 @@
+diff --git a/.gitignore b/.gitignore
+index ec1a6f5..c038d4e 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -52,3 +52,6 @@ src/core4inet/features.h
+ 
+ #ignore VSCODE files
+ .vscode*
++
++# Selected INET4 generated build profile
++/out-inet4/
+diff --git a/src/core4inet/applications/trafficsource/base/BGTrafficSourceApp.cc b/src/core4inet/applications/trafficsource/base/BGTrafficSourceApp.cc
+index daceec4..83da83f 100644
+--- a/src/core4inet/applications/trafficsource/base/BGTrafficSourceApp.cc
++++ b/src/core4inet/applications/trafficsource/base/BGTrafficSourceApp.cc
+@@ -13,6 +13,95 @@
+ // along with this program.  If not, see http://www.gnu.org/licenses/.
+ // 
+ 
++// INET4 build: migrate this upstream application's scheduling and payload
++// semantics; Ethernet encapsulation and NIC queue selection belong to INET4.
++#ifdef CORE4INET_INET4
++#include "core4inet/applications/trafficsource/base/BGTrafficSourceAppInet4.h"
++#include "inet/common/packet/Packet.h"
++#include "inet/common/packet/chunk/ByteCountChunk.h"
++#include "inet/common/ProtocolTag_m.h"
++#include "inet/common/Protocol.h"
++
++namespace CoRE4INET {
++Define_Module(BGTrafficSourceApp);
++
++BGTrafficSourceApp::~BGTrafficSourceApp()
++{
++    cancelAndDelete(timer);
++}
++
++void BGTrafficSourceApp::initialize()
++{
++    payloadSignal = registerSignal("payloadSignal");
++    intervalSignal = registerSignal("intervalSignal");
++    sentSignal = registerSignal("packetSent");
++    receivedSignal = registerSignal("packetReceived");
++    startTime = par("startTime");
++    stopTime = par("stopTime");
++    if (startTime < SIMTIME_ZERO || (stopTime >= SIMTIME_ZERO && stopTime < startTime))
++        throw cRuntimeError("Invalid startTime/stopTime parameters");
++    timer = new cMessage("start");
++    sendInterval = readInterval();
++    if (isEnabled())
++        scheduleAt(simTime() + startTime, timer);
++}
++
++bool BGTrafficSourceApp::isEnabled() const
++{
++    return par("enabled").boolValue() && (stopTime < SIMTIME_ZERO || simTime() < stopTime);
++}
++
++simtime_t BGTrafficSourceApp::readInterval()
++{
++    const double value = par("sendInterval").doubleValue();
++    if (!std::isfinite(value) || value <= 0)
++        throw cRuntimeError("sendInterval must be finite and strictly positive");
++    return value;
++}
++
++void BGTrafficSourceApp::handleMessage(cMessage *msg)
++{
++    if (msg == timer) {
++        if (isEnabled()) {
++            sendMessage();
++            // Preserve upstream ordering: use the cached interval, then sample
++            // the volatile parameter for the next invocation.
++            const simtime_t next = simTime() + sendInterval;
++            emit(intervalSignal, sendInterval);
++            sendInterval = readInterval();
++            if (stopTime < SIMTIME_ZERO || next < stopTime)
++                scheduleAt(next, timer);
++        }
++    }
++    else {
++        auto packet = check_and_cast<inet::Packet *>(msg);
++        ++received;
++        emit(receivedSignal, packet);
++        delete packet;
++    }
++}
++
++void BGTrafficSourceApp::sendMessage()
++{
++    const auto payload = par("payload").intValue();
++    if (payload < 0 || payload > 1500)
++        throw cRuntimeError("Ethernet payload must be between 0 and 1500 bytes");
++    emit(payloadSignal, static_cast<unsigned long>(payload));
++    auto packet = new inet::Packet("Best-Effort Traffic");
++    packet->insertAtBack(inet::makeShared<inet::ByteCountChunk>(inet::B(payload)));
++    packet->addTag<inet::PacketProtocolTag>()->setProtocol(&inet::Protocol::unknown);
++    ++sent;
++    emit(sentSignal, packet);
++    send(packet, "trafficOut");
++}
++
++void BGTrafficSourceApp::finish()
++{
++    recordScalar("packets sent", sent);
++    recordScalar("packets received", received);
++}
++} // namespace CoRE4INET
++#else
+ #include "core4inet/applications/trafficsource/base/BGTrafficSourceApp.h"
+ 
+ //CoRE4INET
+@@ -130,3 +219,5 @@ inet::MACAddress BGTrafficSourceApp::getDestAddress()
+ 
+ }
+ //namespace
++
++#endif // CORE4INET_INET4
+diff --git a/Makefile.inet4 b/Makefile.inet4
+new file mode 100644
+index 0000000..9f47944
+--- /dev/null
++++ b/Makefile.inet4
+@@ -0,0 +1,14 @@
++# Focused INET4 build profile; the original makefiles still build the legacy tree.
++# Usage: source ../../scripts/env.sh; make -f Makefile.inet4
++MODE ?= release
++INET_ROOT ?= $(abspath ../inet)
++PORT_BUILD := $(CURDIR)/out-inet4
++.PHONY: all configure clean
++all: configure
++	$(MAKE) -C $(PORT_BUILD) MODE=$(MODE)
++configure:
++	mkdir -p $(PORT_BUILD)
++	ln -sfn ../src/core4inet/applications/trafficsource/base/BGTrafficSourceApp.cc $(PORT_BUILD)/BGTrafficSourceApp.cc
++	cd $(PORT_BUILD) && opp_makemake --make-so -f -o CoRE4INET_INET4 -DCORE4INET_INET4 -I$(CURDIR)/src -I$(INET_ROOT)/src -L$(INET_ROOT)/src -lINET
++clean:
++	@if test -f $(PORT_BUILD)/Makefile; then $(MAKE) -C $(PORT_BUILD) clean; fi
+diff --git a/examples-inet4/bgtraffic/BackgroundTraffic.ned b/examples-inet4/bgtraffic/BackgroundTraffic.ned
+new file mode 100644
+index 0000000..fb098f8
+--- /dev/null
++++ b/examples-inet4/bgtraffic/BackgroundTraffic.ned
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++import inet.node.inet.StandardHost;
++import inet.node.ethernet.EthernetLink;
++
++network BackgroundTraffic
++{
++    submodules:
++        sender: StandardHost {
++            parameters:
++                numApps = 1;
++                numEthInterfaces = 1;
++        }
++        receiver: StandardHost {
++            parameters:
++                numApps = 1;
++                numEthInterfaces = 1;
++        }
++    connections:
++        sender.ethg[0] <--> EthernetLink { datarate = 100Mbps; delay = 1us; } <--> receiver.ethg[0];
++}
+diff --git a/examples-inet4/bgtraffic/omnetpp.ini b/examples-inet4/bgtraffic/omnetpp.ini
+new file mode 100644
+index 0000000..48c27a5
+--- /dev/null
++++ b/examples-inet4/bgtraffic/omnetpp.ini
+@@ -0,0 +1,14 @@
++[General]
++network = BackgroundTraffic
++sim-time-limit = 10ms
++cmdenv-express-mode = true
++**.app[0].typename = "core4inet.applications.trafficsource.base.BGTrafficSourceApp"
++*.sender.app[0].destAddress = "02:00:00:00:00:02"
++*.sender.app[0].payload = 256Byte
++*.sender.app[0].sendInterval = 1ms
++*.sender.app[0].startTime = 1ms
++*.sender.app[0].stopTime = 5ms
++*.receiver.eth[0].address = "02:00:00:00:00:02"
++*.receiver.app[0].enabled = false
++*.receiver.app[0].localAddress = "02:00:00:00:00:02"
++*.receiver.app[0].destAddress = ""
+diff --git a/src-inet4/core4inet/applications/trafficsource/base/BGTrafficSourceApp.ned b/src-inet4/core4inet/applications/trafficsource/base/BGTrafficSourceApp.ned
+new file mode 100644
+index 0000000..2f23494
+--- /dev/null
++++ b/src-inet4/core4inet/applications/trafficsource/base/BGTrafficSourceApp.ned
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++// INET4 NED profile of upstream BGTrafficSourceApp (Till Steinbach).
++package core4inet.applications.trafficsource.base;
++import inet.applications.contract.IApp;
++import inet.applications.ethernet.EthernetSocketIo;
++
++simple BGTrafficSourceEngine
++{
++    parameters:
++        @class(CoRE4INET::BGTrafficSourceApp);
++        bool enabled;
++        double startTime @unit(s);
++        double stopTime @unit(s);
++        volatile int payload @unit(Byte);
++        volatile double sendInterval @unit(s);
++        @signal[payloadSignal](type=unsigned long);
++        @signal[intervalSignal](type=simtime_t);
++        @signal[packetSent](type=inet::Packet);
++        @signal[packetReceived](type=inet::Packet);
++        @statistic[payloadOverTime](source=payloadSignal; record=vector,stats);
++        @statistic[sendIntervalOverTime](source=intervalSignal; record=vector,stats);
++        @statistic[packetSent](source=packetSent; record=count);
++        @statistic[packetReceived](source=packetReceived; record=count);
++    gates:
++        input trafficIn;
++        output trafficOut;
++}
++
++// Selected port: original periodic source semantics, INET4 socket/NIC path.
++// Set enabled=false to use this application as a background Ethernet sink.
++module BGTrafficSourceApp like IApp
++{
++    parameters:
++        string interfaceTableModule = default("^.interfaceTable");
++        string interface = default("eth0");
++        string destAddress = default("ff:ff:ff:ff:ff:ff");
++        string localAddress = default("");
++        bool enabled = default(true);
++        double startTime @unit(s) = default(0s);
++        double stopTime @unit(s) = default(-1s);
++        volatile int payload @unit(Byte) = default(46Byte);
++        volatile double sendInterval @unit(s) = default(uniform(0s,1s));
++        @application;
++        @display("i=block/source,green");
++    gates:
++        input socketIn;
++        output socketOut;
++    submodules:
++        source: BGTrafficSourceEngine {
++            parameters:
++                enabled = parent.enabled;
++                startTime = parent.startTime;
++                stopTime = parent.stopTime;
++                payload = parent.payload;
++                sendInterval = parent.sendInterval;
++        }
++        io: EthernetSocketIo {
++            parameters:
++                interfaceTableModule = absPath(parent.interfaceTableModule);
++                interface = parent.interface;
++                localAddress = parent.localAddress;
++                remoteAddress = parent.destAddress;
++                protocol = "unknown";
++        }
++    connections:
++        source.trafficOut --> io.trafficIn;
++        io.trafficOut --> source.trafficIn;
++        socketIn --> io.socketIn;
++        io.socketOut --> socketOut;
++}
+diff --git a/src/core4inet/applications/trafficsource/base/BGTrafficSourceAppInet4.h b/src/core4inet/applications/trafficsource/base/BGTrafficSourceAppInet4.h
+new file mode 100644
+index 0000000..47edb8f
+--- /dev/null
++++ b/src/core4inet/applications/trafficsource/base/BGTrafficSourceAppInet4.h
+@@ -0,0 +1,26 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++// Selected INET4 port of CoRE4INET BGTrafficSourceApp and its source-base behavior.
++#ifndef CORE4INET_BGTRAFFICSOURCEAPP_INET4_H
++#define CORE4INET_BGTRAFFICSOURCEAPP_INET4_H
++#include <omnetpp.h>
++#include <cmath>
++namespace CoRE4INET {
++using namespace omnetpp;
++class BGTrafficSourceApp : public cSimpleModule {
++  private:
++    cMessage *timer = nullptr;
++    simtime_t startTime, stopTime, sendInterval;
++    simsignal_t payloadSignal, intervalSignal, sentSignal, receivedSignal;
++    long sent = 0, received = 0;
++    bool isEnabled() const;
++    simtime_t readInterval();
++    void sendMessage();
++  protected:
++    void initialize() override;
++    void handleMessage(cMessage *msg) override;
++    void finish() override;
++  public:
++    ~BGTrafficSourceApp() override;
++};
++}
++#endif

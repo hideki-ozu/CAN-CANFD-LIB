@@ -1,0 +1,1064 @@
+diff --git a/README.md b/README.md
+index 6f6550a..9df5a07 100644
+--- a/README.md
++++ b/README.md
+@@ -16,6 +16,8 @@ To merge the simulation models of CAN and FlexRay significant changes were neces
+ ### CAN
+ It is possible to create networks with traffic consisting of Data-, Remote- and Error-Frames. To get some variation in the transmit and receive times of cyclic messages it is possible to simulate a clock drift.
+ 
++CAN FD data frames are supported with 11- or 29-bit identifiers, legal DLC values, up to 64-byte payloads, and optional bit-rate switching. Set `fdCapable`, `arbitrationBitrate`, and `dataBitrate` on `CanBus`, then set `fd`, `bitRateSwitch`, and `extendedId` on a source application. The existing `bitStuffingPercentage` remains a percentage-based timing approximation: this is not a bit-exact CAN physical-layer model. CAN FD remote frames and CAN FD error injection are rejected because their timing is not modeled.
++
+ The arbitration ensures that the frame with the highest priority is transmitted as soon as several nodes try to transmit their messages.
+ 
+ 
+diff --git a/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.cc b/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.cc
+index ca4ca3b..e6fca7e 100644
+--- a/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.cc
++++ b/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.cc
+@@ -29,7 +29,8 @@
+ #include "fico4omnet/applications/can/source/CanTrafficSourceAppBase.h"
+ 
+ #include "fico4omnet/scheduler/can/CanClock.h"
+-#include "fico4omnet/linklayer/can/CanPortInput.h"
++#include "fico4omnet/linklayer/can/CanPortInput.h"
++#include "fico4omnet/linklayer/can/CanFrameTiming.h"
+ 
+ namespace FiCo4OMNeT {
+ 
+@@ -75,10 +76,14 @@ void CanTrafficSourceAppBase::checkParameterValues() {
+         throw cRuntimeError(
+                 "The value for the parameter \"bitStuffingPercentage\" is not permitted. Permitted values are from 0 to 1.");
+     }
+-    if (canVersion.compare("2.0A") != 0 && canVersion.compare("2.0B") != 0) {
++    if (canVersion.compare("2.0A") != 0 && canVersion.compare("2.0B") != 0) {
+         throw cRuntimeError(
+                 "The value for the parameter \"canVersion\" is not permitted. Permitted values are \"2.0B\" and \"2.0A\".");
+-    }
++    }
++    if (canVersion.compare("2.0A") == 0 && par("extendedId").boolValue())
++        throw cRuntimeError("extendedId requires bus version 2.0B.");
++    if (par("bitRateSwitch").boolValue() && !par("fd").boolValue())
++        throw cRuntimeError("bitRateSwitch requires fd=true.");
+ }
+ 
+ void CanTrafficSourceAppBase::handleMessage(cMessage *msg) {
+@@ -128,21 +133,44 @@ void CanTrafficSourceAppBase::initialFrameCreation(const char *type,
+         if (!initialFrameOffsetTokenizer.hasMoreTokens()) {
+             throw cRuntimeError("No more values for the %s frame offset for the next %s frame ID (at index %d). Configuration in the ini file may be incorrect.", type, type, i);
+         }
+-        CanDataFrame *can_msg = new CanDataFrame(frameType);
+-        can_msg->setCanID(checkAndReturnID(static_cast<unsigned int> (frameIDs.at(i))));
+-        unsigned int dataFieldLength = static_cast<unsigned int> (atoi(dataLengthFramesTokenizer.nextToken()));
+-        can_msg->setBitLength(calculateLength(dataFieldLength));
++        const unsigned int dataFieldLength = static_cast<unsigned int> (atoi(dataLengthFramesTokenizer.nextToken()));
++        const bool fd = par("fd").boolValue();
++        // 2.0B used extended arbitration in the legacy model. Preserve that
++        // behavior unless this is a CAN FD source, where extendedId is explicit.
++        const std::string format = par("identifierFormat").stdstringValue();
++        if (format != "auto" && format != "standard" && format != "extended")
++            throw cRuntimeError("identifierFormat must be auto, standard, or extended");
++        const bool extendedId = format == "extended" || (format == "auto"
++                && (par("extendedId").boolValue() || (!fd && canVersion.compare("2.0B") == 0)));
++        if (extendedId && canVersion == "2.0A")
++            throw cRuntimeError("Extended identifier requires bus version 2.0B");
++        const unsigned int dlc = fd ? CanFrameTiming::dlcForPayloadLength(dataFieldLength) : dataFieldLength;
++        if (std::strcmp(type, "remote") == 0 && fd)
++            throw cRuntimeError("CAN FD remote frames are not supported.");
++        CanDataFrame *can_msg = new CanDataFrame(frameType);
++        const bool remote = std::strcmp(type, "remote") == 0;
++        can_msg->setRtr(remote);
++        can_msg->setExtendedId(extendedId);
++        can_msg->setCanID(checkAndReturnID(static_cast<unsigned int> (frameIDs.at(i))));
++        can_msg->setFd(fd);
++        can_msg->setBrs(par("bitRateSwitch").boolValue());
++        can_msg->setPayloadLength(dataFieldLength);
++        can_msg->setDlc(dlc);
++        can_msg->setPayloadBytesArraySize(remote ? 0 : dataFieldLength);
++        for (unsigned int byte = 0; byte < (remote ? 0 : dataFieldLength); ++byte)
++            can_msg->setPayloadBytes(byte, static_cast<uint8_t>((can_msg->getCanID() + byte) & 0xff));
++        CanFrameTiming::validateFrame(*can_msg);
++        can_msg->setBitLength(CanFrameTiming::frameOverheadBits(*can_msg, bitStuffingPercentage));
+         cPacket *payload_packet = new cPacket;
+         payload_packet->setTimestamp();
+-        payload_packet->setByteLength(dataFieldLength);
++        payload_packet->setByteLength(remote ? 0 : dataFieldLength);
+         can_msg->encapsulate(payload_packet);
+         can_msg->setPeriod(atof(framesPeriodicityTokenizer.nextToken()));
+ 
+         if (std::strcmp(type, "data") == 0) {
+             outgoingDataFrames.push_back(can_msg);
+             registerDataFrameAtPort(can_msg->getCanID());
+-        } else {
+-            can_msg->setRtr(true);
++        } else {
+             registerRemoteFrameAtPort(can_msg->getCanID());
+         }
+ #pragma GCC diagnostic push
+@@ -209,14 +237,14 @@ unsigned int CanTrafficSourceAppBase::checkAndReturnID(unsigned int canID) {
+     return canID;
+ }
+ 
+-unsigned int CanTrafficSourceAppBase::calculateLength(unsigned int dataLength) {
+-    unsigned int arbFieldLength = 0;
+-    if (canVersion.compare("2.0B") == 0) {
+-        arbFieldLength += ARBITRATIONFIELD29BIT;
+-    }
+-    return (arbFieldLength + DATAFRAMECONTROLBITS
+-            + calculateStuffingBits(dataLength, arbFieldLength));
+-}
++unsigned int CanTrafficSourceAppBase::calculateLength(unsigned int dataLength) {
++    CanDataFrame frame;
++    frame.setExtendedId(canVersion.compare("2.0B") == 0);
++    frame.setPayloadLength(dataLength);
++    frame.setDlc(dataLength);
++    frame.setPayloadBytesArraySize(dataLength);
++    return CanFrameTiming::frameOverheadBits(frame, bitStuffingPercentage);
++}
+ 
+ unsigned int CanTrafficSourceAppBase::calculateStuffingBits(unsigned int dataLength,
+         unsigned int arbFieldLength) {
+diff --git a/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.ned b/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.ned
+index 637a412..58800da 100644
+--- a/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.ned
++++ b/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.ned
+@@ -62,7 +62,13 @@ simple CanTrafficSourceAppBase like ISourceApplication
+         //Datafield-length - String parameter (int) separated with commas - unit: byte
+         string dataLengthDataFrames = default("0");			
+         //Offset for the first transmission of the data frames - String parameter (double) separated with commas - unit: s
+-        string initialDataFrameOffset = default("0");
++        string initialDataFrameOffset = default("0");
++        // Enable CAN FD for all data frames from this source. CAN FD remote frames are rejected.
++        bool fd = default(false);
++        bool bitRateSwitch = default(false);
++        bool extendedId = default(false);
++        // Explicit override; auto preserves legacy 2.0B behavior.
++        string identifierFormat @enum("auto", "standard", "extended") = default("auto");
+         //The Remote Frame ID(s) - String parameter (int) separated with commas
+         string idRemoteFrames = default("0");	
+         //Remote Frame period(s) for sending of messages - String parameter (int) separated with commas - unit: s
+@@ -79,4 +85,4 @@ simple CanTrafficSourceAppBase like ISourceApplication
+         output out @labels(DataFrame);
+         //Received remote frames are received at this gate. 
+         input remoteIn @directIn;
+-}
+\ No newline at end of file
++}
+diff --git a/src/fico4omnet/buffer/can/CanOutputBuffer.cc b/src/fico4omnet/buffer/can/CanOutputBuffer.cc
+index 8dc6d82..ba23590 100644
+--- a/src/fico4omnet/buffer/can/CanOutputBuffer.cc
++++ b/src/fico4omnet/buffer/can/CanOutputBuffer.cc
+@@ -47,40 +47,52 @@ void CanOutputBuffer::putFrame(cMessage* msg) {
+     CanDataFrame *frame = dynamic_cast<CanDataFrame *>(msg);
+     if (MOB == true) {
+         if (getFrame(frame->getCanID()) != nullptr) {
+-            checkoutFromArbitration(frame->getCanID());
++            checkoutFromArbitration(frame->getCanID(), frame->getExtendedId(), frame->getRtr());
+         }
+     }
+     frames.push_back(frame);
+     emit(queueLengthSignal, static_cast<unsigned long>(frames.size()));
+     queueSize+=static_cast<size_t>(frame->getByteLength());
+     emit(queueSizeSignal, static_cast<unsigned long>(queueSize));
+-    registerForArbitration(frame->getCanID(), frame->getRtr());
++    registerForArbitration(frame->getCanID(), frame->getRtr(), frame->getExtendedId());
+     emit(rxPkSignal, msg);
+ }
+ 
+-void CanOutputBuffer::registerForArbitration(unsigned int canID, bool rtr) {
++void CanOutputBuffer::registerForArbitration(unsigned int canID, bool rtr, bool extendedId) {
+     CanBusLogic *canBusLogic =
+             dynamic_cast<CanBusLogic*> (getParentModule()->gate("gate$o")->getPathEndGate()->getOwnerModule()->getParentModule()->getSubmodule(
+                     "canBusLogic"));
+-    canBusLogic->registerForArbitration(canID, this, simTime(), rtr);
+-}
+-
+-void CanOutputBuffer::checkoutFromArbitration(unsigned int canID) {
+-    CanBusLogic *canBusLogic =
+-            dynamic_cast<CanBusLogic*> (getParentModule()->gate("gate$o")->getPathEndGate()->getOwnerModule()->getParentModule()->getSubmodule(
+-                    "canBusLogic"));
+-    if (canBusLogic->getCurrentSendingId() != canID && canBusLogic->getSendingNodeID() != this->getId()) {
+-        canBusLogic->checkoutFromArbitration(canID);
+-        deleteFrame(canID);
+-    }
+-}
+-
+-void CanOutputBuffer::receiveSendingPermission(unsigned int canID) {
+-    Enter_Method_Silent
+-    ();
+-    deliverFrame(canID);
++    canBusLogic->registerForArbitration(canID, this, simTime(), rtr, extendedId);
+ }
+ 
++void CanOutputBuffer::checkoutFromArbitration(unsigned int canID, bool extendedId, bool rtr) {
++    auto bus = check_and_cast<CanBusLogic *>(getParentModule()->gate("gate$o")
++            ->getPathEndGate()->getOwnerModule()->getParentModule()->getSubmodule("canBusLogic"));
++    // Mailbox overwrite affects a pending frame only, never the active transfer.
++    for (auto message : frames) {
++        auto frame = check_and_cast<CanDataFrame *>(message);
++        if (frame != currentFrame && frame->getCanID() == canID
++                && frame->getExtendedId() == extendedId && frame->getRtr() == rtr) {
++            bus->checkoutFromArbitration(canID, extendedId, this, rtr);
++            deleteFrame(frame);
++            return;
++        }
++    }
++}
++
++void CanOutputBuffer::receiveSendingPermission(unsigned int canID, bool extendedId, bool rtr) {
++    Enter_Method_Silent();
++    for (auto message : frames) {
++        auto frame = check_and_cast<CanDataFrame *>(message);
++        if (frame->getCanID() == canID && frame->getExtendedId() == extendedId && frame->getRtr() == rtr) {
++            currentFrame = frame;
++            sendToDestinationGates(frame->dup());
++            return;
++        }
++    }
++    throw cRuntimeError("CAN arbitration winner has no matching queued frame");
++}
++
+ void CanOutputBuffer::sendingCompleted() {
+     Enter_Method_Silent
+     ();
+diff --git a/src/fico4omnet/buffer/can/CanOutputBuffer.h b/src/fico4omnet/buffer/can/CanOutputBuffer.h
+index 8f98653..a4f0b96 100644
+--- a/src/fico4omnet/buffer/can/CanOutputBuffer.h
++++ b/src/fico4omnet/buffer/can/CanOutputBuffer.h
+@@ -56,7 +56,7 @@ public:
+      *
+      * @param canID The can ID of the frame
+      */
+-    virtual void receiveSendingPermission(unsigned int canID);
++    virtual void receiveSendingPermission(unsigned int canID, bool extendedId, bool rtr);
+ 
+     /**
+      * @brief Is called when the frame transmission is completed.
+@@ -78,14 +78,14 @@ protected:
+      * @param canID The can ID of the frame
+      * @param rtr Identifier whether the frame is a remote frame
+      */
+-    virtual void registerForArbitration(unsigned int canID, bool rtr);
++    virtual void registerForArbitration(unsigned int canID, bool rtr, bool extendedId);
+ 
+     /**
+      * @brief Unregister from arbitration at the bus.
+      *
+      * @param canID The can ID of the frame
+      */
+-    virtual void checkoutFromArbitration(unsigned int canID);
++    virtual void checkoutFromArbitration(unsigned int canID, bool extendedId, bool rtr);
+ };
+ 
+ }
+diff --git a/src/fico4omnet/bus/can/CanBusLogic.cc b/src/fico4omnet/bus/can/CanBusLogic.cc
+index 55001e9..17fe770 100644
+--- a/src/fico4omnet/bus/can/CanBusLogic.cc
++++ b/src/fico4omnet/bus/can/CanBusLogic.cc
+@@ -28,7 +28,8 @@
+ 
+ #include "fico4omnet/bus/can/CanBusLogic.h"
+ 
+-#include "fico4omnet/buffer/can/CanOutputBuffer.h"
++#include "fico4omnet/buffer/can/CanOutputBuffer.h"
++#include "fico4omnet/linklayer/can/CanFrameTiming.h"
+ 
+ //Auto-generated messages
+ #include "fico4omnet/linklayer/can/messages/ErrorFrame_m.h"
+@@ -51,11 +52,14 @@ CanBusLogic::CanBusLogic() {
+     numFramesSent = 0;
+     numBitsSent = 0;
+ 
+-    bandwidth = 0;
+-    currentSendingID = 0;
++    bandwidth = 0;
++    currentSendingID = 0;
++    currentSendingExtendedId = false;
+     sendingNode = nullptr;
+ }
+-CanBusLogic::~CanBusLogic() {
++CanBusLogic::~CanBusLogic() {
++    for (auto entry : ids) delete entry;
++    ids.clear();
+     if(scheduledDataFrame){
+         cancelAndDelete(scheduledDataFrame);
+     }
+@@ -72,7 +76,16 @@ void CanBusLogic::initialize() {
+     bubble("state: idle");
+     getDisplayString().setTagArg("tt", 0, "state: idle");
+ 
+-    bandwidth = getParentModule()->par("bandwidth");
++    bandwidth = getParentModule()->par("bandwidth");
++    fdCapable = getParentModule()->par("fdCapable");
++    arbitrationBitrate = getParentModule()->par("arbitrationBitrate");
++    dataBitrate = getParentModule()->par("dataBitrate");
++    if (arbitrationBitrate == 0)
++        arbitrationBitrate = bandwidth;
++    if (dataBitrate == 0)
++        dataBitrate = arbitrationBitrate;
++    if (arbitrationBitrate <= 0 || dataBitrate <= 0)
++        throw cRuntimeError("CAN bus bitrates must be greater than zero.");
+ }
+ 
+ void CanBusLogic::finish() {
+@@ -114,54 +127,36 @@ void CanBusLogic::handleMessage(cMessage *msg) {
+     delete msg;
+ }
+ 
+-void CanBusLogic::grantSendingPermission() {
+-    currentSendingID = INT_MAX;
+-    sendingNode = nullptr;
+-
+-    for (std::list<CanID*>::iterator it = ids.begin(); it != ids.end(); ++it) {
+-        CanID *id = *it;
+-        if (id->getCanID() < currentSendingID) {
+-            currentSendingID = id->getCanID();
+-            sendingNode = dynamic_cast<CanOutputBuffer*> (id->getNode());
+-            currsit = id->getSignInTime();
+-        }
+-    }
+-
+-    int sendcount = 0;
+-    bool nodeFound = false;
+-    for (std::list<CanID*>::iterator it = ids.begin(); it != ids.end(); ++it) {
+-        CanID *id = *it;
+-        if (id->getCanID() == currentSendingID) {
+-            if (id->getRtr() == false) { //Data-Frame
+-                sendcount++;
+-                if (!nodeFound) {
+-                    nodeFound = true;
+-                    sendingNode = dynamic_cast<CanOutputBuffer*> (id->getNode());
+-                    currsit = id->getSignInTime();
+-                    eraseids.push_back(it);
+-                }
+-            } else {
+-                eraseids.push_back(it);
+-            }
+-        }
+-    }
+-
+-    if (sendcount > 1) {
+-        getParentModule()->cComponent::bubble("More than one node sends with the same ID.");
+-        getParentModule()->getDisplayString().setTagArg("i2", 0, "status/excl3");
+-        getParentModule()->getDisplayString().setTagArg("tt", 0, "WARNING: More than one node sends with the same ID.");
+-    }
+-    if (sendingNode != nullptr) {
+-        CanOutputBuffer* controller = check_and_cast<CanOutputBuffer *>(
+-                sendingNode);
+-        controller->receiveSendingPermission(currentSendingID);
+-    } else {
+-        idle = true;
+-        getDisplayString().setTagArg("tt", 0, "state: idle");
+-        bubble("state: idle");
+-    }
+-}
+-
++void CanBusLogic::grantSendingPermission() {
++    currentSendingID = INT_MAX;
++    currentSendingExtendedId = false;
++    sendingNode = nullptr;
++    auto selected = ids.end();
++    for (auto it = ids.begin(); it != ids.end(); ++it)
++        if (selected == ids.end() || winsArbitration(*it, *selected))
++            selected = it;
++    if (selected == ids.end()) {
++        idle = true;
++        getDisplayString().setTagArg("tt", 0, "state: idle");
++        return;
++    }
++    CanID *winner = *selected;
++    // Multiple queued frames in one controller are normal under load. Only
++    // competing data transmitters with the same identifier need collision PHY.
++    for (auto candidate : ids)
++        if (!winner->getRtr() && !candidate->getRtr()
++                && candidate->getCanID() == winner->getCanID()
++                && candidate->getExtendedId() == winner->getExtendedId()
++                && candidate->getNode() != winner->getNode())
++            throw cRuntimeError("Multiple nodes requested the same CAN arbitration identifier and format; collision modeling is not implemented.");
++    currentSendingID = winner->getCanID();
++    currentSendingExtendedId = winner->getExtendedId();
++    sendingNode = check_and_cast<CanOutputBuffer *>(winner->getNode());
++    currsit = winner->getSignInTime();
++    eraseids.push_back(selected);
++    check_and_cast<CanOutputBuffer *>(sendingNode)->receiveSendingPermission(currentSendingID, currentSendingExtendedId, winner->getRtr());
++}
++
+ void CanBusLogic::sendingCompleted() {
+     colorIdle();
+     emit(stateSignal, static_cast<long>(State::IDLE));
+@@ -181,10 +176,15 @@ void CanBusLogic::sendingCompleted() {
+ }
+ 
+ void CanBusLogic::handleDataFrame(cMessage *msg) {
+-    CanDataFrame *df = check_and_cast<CanDataFrame *>(msg);
+-    int64_t length = df->getBitLength();
+-    double nextidle;
+-    nextidle = static_cast<double> (length) / bandwidth;
++    CanDataFrame *df = check_and_cast<CanDataFrame *>(msg);
++    CanFrameTiming::validateFrame(*df);
++    if (df->getFd() && !fdCapable)
++        throw cRuntimeError("CAN FD frame received on a bus with fdCapable=false.");
++    const unsigned int expectedLength = CanFrameTiming::frameBitLength(*df, getParentModule()->par("bitStuffingPercentage"));
++    if (df->getBitLength() != expectedLength)
++        throw cRuntimeError("CAN frame bit length does not match CAN/CAN FD metadata.");
++    const double nextidle = CanFrameTiming::transmissionTime(*df, arbitrationBitrate,
++            dataBitrate, getParentModule()->par("bitStuffingPercentage"));
+     if (scheduledDataFrame != nullptr) {
+         cancelEvent(scheduledDataFrame);
+     }
+@@ -211,22 +211,22 @@ void CanBusLogic::handleErrorFrame(cMessage *msg) {
+     if (!errored) {
+         numErrorFrames++;
+         ErrorFrame *ef2 = new ErrorFrame();
+-        scheduleAt(simTime() + (MAXERRORFRAMESIZE / (bandwidth)), ef2);
++        scheduleAt(simTime() + (MAXERRORFRAMESIZE / arbitrationBitrate), ef2);
+         emit(rcvdEFSignal, ef2);
+         errored = true;
+         send(msg->dup(), "gate$o");
+     }
+ }
+ 
+-void CanBusLogic::registerForArbitration(unsigned int canID, cModule *module,
+-        simtime_t signInTime, bool rtr) {
++void CanBusLogic::registerForArbitration(unsigned int canID, cModule *module,
++        simtime_t signInTime, bool rtr, bool extendedId) {
+     Enter_Method_Silent
+     ();
+-    ids.push_back(new CanID(canID, module, signInTime, rtr));
++    ids.push_back(new CanID(canID, module, signInTime, rtr, extendedId));
+     emit(arbitrationLengthSignal, static_cast<unsigned long>(ids.size()));
+     if (idle) {
+         cMessage *self = new cMessage("idle_signin");
+-        scheduleAt(simTime() + (1 / (bandwidth)), self);
++        scheduleAt(simTime() + (1 / arbitrationBitrate), self);
+         idle = false;
+         bubble("state: busy");
+         getDisplayString().setTagArg("tt", 0, "state: busy");
+@@ -234,19 +234,37 @@ void CanBusLogic::registerForArbitration(unsigned int canID, cModule *module,
+     }
+ }
+ 
+-void CanBusLogic::checkoutFromArbitration(unsigned int canID) {
+-    Enter_Method_Silent
+-    ();
+-    for (std::list<CanID*>::iterator it = ids.begin(); it != ids.end(); ++it) {
+-        CanID* tmp = *it;
+-        if (tmp->getCanID() == canID) {
+-            ids.remove(tmp);
+-            delete tmp;
+-            break;
+-        }
+-    }
+-    emit(arbitrationLengthSignal, static_cast<unsigned long>(ids.size()));
+-}
++void CanBusLogic::checkoutFromArbitration(unsigned int canID, bool extendedId, cModule *owner, bool rtr) {
++    Enter_Method_Silent();
++    for (auto it = ids.begin(); it != ids.end(); ++it) {
++        auto entry = *it;
++        bool active = false;
++        for (auto selected : eraseids)
++            if (selected == it) active = true;
++        if (!active && entry->getCanID() == canID && entry->getExtendedId() == extendedId
++                && entry->getNode() == owner && entry->getRtr() == rtr) {
++            delete entry;
++            ids.erase(it);
++            emit(arbitrationLengthSignal, static_cast<unsigned long>(ids.size()));
++            return;
++        }
++    }
++    throw cRuntimeError("Pending CAN frame missing from arbitration queue");
++}
++
++bool CanBusLogic::winsArbitration(const CanID *candidate, const CanID *current) {
++    if (candidate->getExtendedId() == current->getExtendedId()) {
++        if (candidate->getCanID() != current->getCanID())
++            return candidate->getCanID() < current->getCanID();
++        return !candidate->getRtr() && current->getRtr();
++    }
++    const unsigned int candidateBaseId = candidate->getExtendedId() ? candidate->getCanID() >> 18 : candidate->getCanID();
++    const unsigned int currentBaseId = current->getExtendedId() ? current->getCanID() >> 18 : current->getCanID();
++    if (candidateBaseId != currentBaseId)
++        return candidateBaseId < currentBaseId;
++    // A base-format frame wins the SRR/IDE arbitration bits over an extended frame.
++    return !candidate->getExtendedId();
++}
+ 
+ void CanBusLogic::colorBusy() {
+     if (getEnvir()->isGUI()) {
+diff --git a/src/fico4omnet/bus/can/CanBusLogic.h b/src/fico4omnet/bus/can/CanBusLogic.h
+index e6ead7d..f7ef263 100644
+--- a/src/fico4omnet/bus/can/CanBusLogic.h
++++ b/src/fico4omnet/bus/can/CanBusLogic.h
+@@ -71,23 +71,24 @@ public:
+      * @param rtr identifier whether the frame is a remote frame
+      */
+     virtual void registerForArbitration(unsigned int canID, cModule *module,
+-            simtime_t signInTime, bool rtr);
++            simtime_t signInTime, bool rtr, bool extendedId);
+ 
+     /**
+      * @brief The request for frame with the corresponding ID will be checked out.
+      *
+      * @param canID the ID of the can frame that should be checked out
+      */
+-    virtual void checkoutFromArbitration(unsigned int canID);
++    virtual void checkoutFromArbitration(unsigned int canID, bool extendedId, cModule *owner, bool rtr);
+ 
+     /**
+      * @brief getter for #currentSendingID
+      *
+      * @return the can ID of the frame that is currently transmitted.
+      */
+-    unsigned int getCurrentSendingId() const {
++    unsigned int getCurrentSendingId() const {
+         return currentSendingID;
+-    }
++    }
++    bool getCurrentSendingExtendedId() const { return currentSendingExtendedId; }
+ 
+     /**
+      * @brief Returns the object ID of the currently transmitting module.
+@@ -190,7 +191,11 @@ private:
+      * @brief Bandwidth of the bus in Mbps.
+      *
+      */
+-    double bandwidth;
++    double bandwidth;
++
++    bool fdCapable;
++    double arbitrationBitrate;
++    double dataBitrate;
+ 
+     /**
+      * true if bus is in idle state; false if in busy state
+@@ -231,7 +236,8 @@ private:
+     /**
+      * @brief ID of the message which is currently transmitted.
+      */
+-    unsigned int currentSendingID;
++    unsigned int currentSendingID;
++    bool currentSendingExtendedId;
+ 
+     /**
+      * @brief Total number of frames transmitted over the bus.
+@@ -290,7 +296,9 @@ private:
+     /**
+      * @brief Colors the connections of the bus to represent a transmission of an error frame.
+      */
+-    virtual void colorError();
++    virtual void colorError();
++
++    static bool winsArbitration(const CanID *candidate, const CanID *current);
+ };
+ 
+ }
+diff --git a/src/fico4omnet/bus/can/CanID.cc b/src/fico4omnet/bus/can/CanID.cc
+index ddca769..bb17218 100644
+--- a/src/fico4omnet/bus/can/CanID.cc
++++ b/src/fico4omnet/bus/can/CanID.cc
+@@ -30,8 +30,8 @@
+ 
+ namespace FiCo4OMNeT {
+ 
+-CanID::CanID(unsigned int setCanID, cModule *setModule, simtime_t setSignInTime, bool setRtr) :
+-        canID(setCanID), module(setModule), signInTime(setSignInTime), rtr(setRtr) {
++CanID::CanID(unsigned int setCanID, cModule *setModule, simtime_t setSignInTime, bool setRtr, bool setExtendedId) :
++        canID(setCanID), module(setModule), signInTime(setSignInTime), rtr(setRtr), extendedId(setExtendedId) {
+ }
+ 
+ unsigned int CanID::getCanID() const{
+@@ -42,9 +42,13 @@ cModule* CanID::getNode() const{
+     return module;
+ }
+ 
+-bool CanID::getRtr() const{
++bool CanID::getRtr() const{
+     return rtr;
+-}
++}
++
++bool CanID::getExtendedId() const{
++    return extendedId;
++}
+ 
+ simtime_t CanID::getSignInTime() const {
+     return signInTime;
+diff --git a/src/fico4omnet/bus/can/CanID.h b/src/fico4omnet/bus/can/CanID.h
+index 64eb12d..cabe8c3 100644
+--- a/src/fico4omnet/bus/can/CanID.h
++++ b/src/fico4omnet/bus/can/CanID.h
+@@ -57,7 +57,7 @@ class CanID {
+ 		 * @param setSignInTime the time the frame was signed in
+ 		 * @param setRtr identifier whether the frame is a remote frame
+ 		 */
+-		CanID(unsigned int setCanID, cModule *setModule, simtime_t setSignInTime, bool setRtr);
++		CanID(unsigned int setCanID, cModule *setModule, simtime_t setSignInTime, bool setRtr, bool setExtendedId);
+ 
+ 		/**
+ 	     * @brief Getter for the can ID
+@@ -89,7 +89,8 @@ class CanID {
+ 		 * @return the RTR-bit of the CanID object.
+ 		 *
+ 		 */
+-		bool getRtr() const;
++		bool getRtr() const;
++		bool getExtendedId() const;
+ 
+ 	private:
+ 		/**
+@@ -110,7 +111,8 @@ class CanID {
+ 		/**
+ 		* @brief identifier whether the frame is a data or remote frame.
+ 		*/
+-		bool rtr;
++		bool rtr;
++		bool extendedId;
+ };
+ 
+ }
+diff --git a/src/fico4omnet/bus/can/canBus.ned b/src/fico4omnet/bus/can/canBus.ned
+index 204efc9..5af83c1 100644
+--- a/src/fico4omnet/bus/can/canBus.ned
++++ b/src/fico4omnet/bus/can/canBus.ned
+@@ -44,7 +44,11 @@ module CanBus
+         @display("i=block/network");
+         
+         //bandwidth of the bus
+-        double bandwidth @unit(bps) = default(1Mbps);
++        double bandwidth @unit(bps) = default(1Mbps);
++        // CAN FD admission and rates. Zero uses bandwidth for compatibility with classical networks.
++        bool fdCapable = default(false);
++        double arbitrationBitrate @unit(bps) = default(0bps);
++        double dataBitrate @unit(bps) = default(0bps);
+         //Version of CAN-Protocol. 2.0A = 11 Bits identifier, 2.0B = 29 Bits identifier
+         string version @enum("2.0A", "2.0B") = default("2.0A");					
+         //Value for the percentage distribution for bit stuffing. Valid values 0 to 1.
+diff --git a/src/fico4omnet/linklayer/can/CanPortInput.cc b/src/fico4omnet/linklayer/can/CanPortInput.cc
+index d847348..c7b0f97 100644
+--- a/src/fico4omnet/linklayer/can/CanPortInput.cc
++++ b/src/fico4omnet/linklayer/can/CanPortInput.cc
+@@ -29,23 +29,35 @@
+ #include "fico4omnet/linklayer/can/CanPortInput.h"
+ 
+ #include "fico4omnet/linklayer/can/CanPortOutput.h"
+-#include "fico4omnet/buffer/can/CanOutputBuffer.h"
++#include "fico4omnet/buffer/can/CanOutputBuffer.h"
++#include "fico4omnet/linklayer/can/CanFrameTiming.h"
+ 
+ namespace FiCo4OMNeT {
+ 
+ Define_Module(CanPortInput);
+ 
+ CanPortInput::CanPortInput(){
+-    this->bandwidth = 0;
++    this->bandwidth = 0;
++    this->arbitrationBitrate = 0;
++    this->dataBitrate = 0;
++    this->bitStuffingPercentage = 0;
+     this->errorperc = 0;
+     this->scheduledDataFrame = nullptr;
+     this->scheduledErrorFrame = nullptr;
+ }
+ 
+ void CanPortInput::initialize() {
+-    bandwidth =
+-            getParentModule()->getParentModule()->gate("gate$o")->getPathEndGate()->getOwnerModule()->getParentModule()->par(
+-                    "bandwidth");
++    bandwidth =
++            getParentModule()->getParentModule()->gate("gate$o")->getPathEndGate()->getOwnerModule()->getParentModule()->par(
++                    "bandwidth");
++    cModule *bus = getParentModule()->getParentModule()->gate("gate$o")->getPathEndGate()->getOwnerModule()->getParentModule();
++    arbitrationBitrate = bus->par("arbitrationBitrate");
++    dataBitrate = bus->par("dataBitrate");
++    bitStuffingPercentage = bus->par("bitStuffingPercentage");
++    if (arbitrationBitrate == 0)
++        arbitrationBitrate = bandwidth;
++    if (dataBitrate == 0)
++        dataBitrate = arbitrationBitrate;
+     errorperc = getParentModule()->getParentModule()->par("errorperc");
+ 
+ 
+@@ -89,17 +101,20 @@ void CanPortInput::handleMessage(cMessage *msg) {
+     }
+ }
+ 
+-void CanPortInput::receiveMessage(CanDataFrame *df) {
++void CanPortInput::receiveMessage(CanDataFrame *df) {
++    CanFrameTiming::validateFrame(*df);
+     if (scheduledDataFrame != nullptr) {
+         cancelEvent(scheduledDataFrame);
+     }
+     delete (scheduledDataFrame);
+     scheduledDataFrame = df->dup();
+-    scheduleAt((simTime() + calculateScheduleTiming(static_cast<int>(df->getBitLength()))),
+-            scheduledDataFrame);
+-}
++    scheduleAt((simTime() + calculateScheduleTiming(df)),
++            scheduledDataFrame);
++}
+ 
+-void CanPortInput::generateReceiveError(CanDataFrame *df) {
++void CanPortInput::generateReceiveError(CanDataFrame *df) {
++    if (df->getFd())
++        throw cRuntimeError("CAN FD receive-error injection is not supported by this timing model.");
+     ErrorFrame *errorMsg = new ErrorFrame("receiveError");
+     int errorPos = intuniform(0, static_cast<int>(df->getBitLength()) - MAXERRORFRAMESIZE);
+     errorMsg->setKind(intuniform(2, 3)); //2: CRC-error, 3: Bit-Stuffing-error
+@@ -155,9 +170,14 @@ bool CanPortInput::checkIncomingDataFrames(unsigned int canID) {
+     return false;
+ }
+ 
+-double CanPortInput::calculateScheduleTiming(int length) {
+-    return static_cast<double> (length) / bandwidth;
+-}
++double CanPortInput::calculateScheduleTiming(int length) {
++    return static_cast<double> (length) / bandwidth;
++}
++
++double CanPortInput::calculateScheduleTiming(const CanDataFrame *frame) {
++    return CanFrameTiming::transmissionTime(*frame, arbitrationBitrate, dataBitrate,
++            bitStuffingPercentage);
++}
+ 
+ void CanPortInput::forwardDataFrame(CanDataFrame *df) {
+     std::map<unsigned int, cGate*>::iterator it;
+diff --git a/src/fico4omnet/linklayer/can/CanPortInput.h b/src/fico4omnet/linklayer/can/CanPortInput.h
+index ba3b2f8..602fbc0 100644
+--- a/src/fico4omnet/linklayer/can/CanPortInput.h
++++ b/src/fico4omnet/linklayer/can/CanPortInput.h
+@@ -132,7 +132,11 @@ private:
+     /**
+      * @brief Bandwidth of the bus in Mbps.
+      */
+-    double bandwidth;
++    double bandwidth;
++
++    double arbitrationBitrate;
++    double dataBitrate;
++    double bitStuffingPercentage;
+ 
+     /**
+      * @brief Probability that an error for the received frame will occur.
+@@ -207,7 +211,9 @@ private:
+      *
+      * @return the duration in seconds until frame transmission is completed
+      */
+-    virtual double calculateScheduleTiming(int length);
++    virtual double calculateScheduleTiming(int length);
++
++    virtual double calculateScheduleTiming(const CanDataFrame *frame);
+ 
+     /**
+      * @brief Forwards the received frame to the responsible module.
+diff --git a/src/fico4omnet/linklayer/can/CanPortOutput.cc b/src/fico4omnet/linklayer/can/CanPortOutput.cc
+index 3f88201..00da1ac 100644
+--- a/src/fico4omnet/linklayer/can/CanPortOutput.cc
++++ b/src/fico4omnet/linklayer/can/CanPortOutput.cc
+@@ -36,7 +36,8 @@ namespace FiCo4OMNeT {
+ Define_Module(CanPortOutput);
+ 
+ CanPortOutput::CanPortOutput(){
+-    this->bandwidth = 0;
++    this->bandwidth = 0;
++    this->arbitrationBitrate = 0;
+     this->errorperc = 0;
+     this->scheduledErrorFrame = nullptr;
+     this->errorReceived = false;
+@@ -57,7 +58,11 @@ void CanPortOutput::handleReceivedErrorFrame() {
+ }
+ 
+ void CanPortOutput::initialize() {
+-    bandwidth = getParentModule()->getParentModule()->gate("gate$o")->getPathEndGate()->getOwnerModule()->getParentModule()->par("bandwidth");
++    bandwidth = getParentModule()->getParentModule()->gate("gate$o")->getPathEndGate()->getOwnerModule()->getParentModule()->par("bandwidth");
++    cModule *bus = getParentModule()->getParentModule()->gate("gate$o")->getPathEndGate()->getOwnerModule()->getParentModule();
++    arbitrationBitrate = bus->par("arbitrationBitrate");
++    if (arbitrationBitrate == 0)
++        arbitrationBitrate = bandwidth;
+     errorperc = getParentModule()->getParentModule()->par("errorperc");
+     scheduledErrorFrame = new ErrorFrame();
+     initializeStatisticValues();
+@@ -88,7 +93,9 @@ void CanPortOutput::handleMessage(cMessage *msg) {
+         CanDataFrame *df;
+         colorBusy();
+         errorReceived = false;
+-        if ((df = dynamic_cast<CanDataFrame *>(msg)) && (errorperc > 0)) {
++        if ((df = dynamic_cast<CanDataFrame *>(msg)) && (errorperc > 0)) {
++            if (df->getFd())
++                throw cRuntimeError("CAN FD send-error injection is not supported by this timing model.");
+             int senderr = intuniform(0, 99);
+             if (senderr < errorperc) {
+                 ErrorFrame *errself = new ErrorFrame("senderror");
+@@ -118,7 +125,7 @@ void CanPortOutput::handleMessage(cMessage *msg) {
+ }
+ 
+ double CanPortOutput::calculateScheduleTiming(int length) {
+-    return static_cast<double> (length) / (bandwidth);
++    return static_cast<double> (length) / arbitrationBitrate;
+ }
+ 
+ void CanPortOutput::sendingCompleted(){
+diff --git a/src/fico4omnet/linklayer/can/CanPortOutput.h b/src/fico4omnet/linklayer/can/CanPortOutput.h
+index a3ea4a8..59cf23b 100644
+--- a/src/fico4omnet/linklayer/can/CanPortOutput.h
++++ b/src/fico4omnet/linklayer/can/CanPortOutput.h
+@@ -111,7 +111,8 @@ private:
+     /**
+      * @brief Bandwidth of the bus in Mbps.
+      */
+-    double bandwidth;
++    double bandwidth;
++    double arbitrationBitrate;
+ 
+     /**
+      * @brief Probability that an error for the received frame will occur.
+diff --git a/src/fico4omnet/linklayer/can/messages/CanDataFrame.msg b/src/fico4omnet/linklayer/can/messages/CanDataFrame.msg
+index 3e05d72..eaf9067 100644
+--- a/src/fico4omnet/linklayer/can/messages/CanDataFrame.msg
++++ b/src/fico4omnet/linklayer/can/messages/CanDataFrame.msg
+@@ -39,9 +39,17 @@ cplusplus {{
+ //
+ // Represents data and remote frames
+ //
+-packet CanDataFrame{
+-    string displayString;
+-	unsigned int canID;			// ID of the message
+-	bool rtr;			// true if remote-frame
+-	double period;			// Periodicy of the message
+-}
+\ No newline at end of file
++packet CanDataFrame{
++    string displayString;
++	unsigned int canID;			// ID of the message
++	bool rtr;			// true if remote-frame
++	double period;			// Periodicy of the message
++	// CAN FD metadata. Classical CAN frames retain the defaults below.
++	bool fd = false;
++	bool brs = false;
++	bool extendedId = false;
++	unsigned int dlc = 0;
++	unsigned int payloadLength = 0;
++	// Deterministic modeled payload bytes; the encapsulated cPacket is a timing envelope.
++	uint8_t payloadBytes[];
++}
+diff --git a/src/makefrag b/src/makefrag
+index dca405d..4cd56ea 100644
+--- a/src/makefrag
++++ b/src/makefrag
+@@ -1,5 +1,7 @@
+ 
+-CFLAGS += -std=c++14
++# OMNeT++ 6.4 headers require C++17. This is appended after CFLAGS by the
++# generated Makefile, so it also overrides the former C++14 setting.
++CFLAGS += -std=c++17
+ MSGC += -I.
+ 
+ 
+diff --git a/examples/can/canfd/README b/examples/can/canfd/README
+new file mode 100644
+index 0000000..b232c30
+--- /dev/null
++++ b/examples/can/canfd/README
+@@ -0,0 +1,10 @@
++# CAN FD example
++
++`BRSOff` and `BRSOn` send a 64-byte standard-ID CAN FD frame at 500 kbit/s
++arbitration rate. `BRSOn` switches its data phase to 2 Mbit/s and therefore
++finishes sooner. `InvalidPayload` and `InvalidFdRemote` intentionally fail
++during initialization, exercising validation of unsupported CAN FD payload
++lengths and remote frames.
++
++Timing uses FiCo4OMNeT's configurable percentage-based stuffing approximation;
++it does not simulate individual stuffed bits or a physical layer.
+diff --git a/examples/can/canfd/canfd.ned b/examples/can/canfd/canfd.ned
+new file mode 100644
+index 0000000..867b814
+--- /dev/null
++++ b/examples/can/canfd/canfd.ned
+@@ -0,0 +1,32 @@
++//Copyright (c) 2014, CoRE Research Group, Hamburg University of Applied Sciences
++//All rights reserved.
++//
++//Redistribution and use in source and binary forms, with or without modification,
++//are permitted provided that the following conditions are met:
++//
++//1. Redistributions of source code must retain the above copyright notice, this
++//   list of conditions and the following disclaimer.
++//
++//2. Redistributions in binary form must reproduce the above copyright notice,
++//   this list of conditions and the following disclaimer in the documentation
++//   and/or other materials provided with the distribution.
++//
++//3. Neither the name of the copyright holder nor the names of its contributors
++//   may be used to endorse or promote products derived from this software without
++//   specific prior written permission.
++
++package fico4omnet.examples.can.canfd;
++
++import fico4omnet.bus.can.CanBus;
++import fico4omnet.nodes.can.CanNode;
++
++network CanFd
++{
++    submodules:
++        bus: CanBus { gates: gate[2]; }
++        sender: CanNode;
++        receiver: CanNode;
++    connections:
++        bus.gate[0] <--> sender.gate;
++        bus.gate[1] <--> receiver.gate;
++}
+diff --git a/examples/can/canfd/omnetpp.ini b/examples/can/canfd/omnetpp.ini
+new file mode 100644
+index 0000000..64859fd
+--- /dev/null
++++ b/examples/can/canfd/omnetpp.ini
+@@ -0,0 +1,36 @@
++[Config BRSOff]
++network = CanFd
++sim-time-limit = 3ms
++
++*.bus.version = "2.0B"
++*.bus.fdCapable = true
++*.bus.bandwidth = 500kbps
++*.bus.arbitrationBitrate = 500kbps
++*.bus.dataBitrate = 2Mbps
++*.bus.bitStuffingPercentage = 0
++*.sender.errorperc = 0
++*.receiver.errorperc = 0
++*.receiver.bufferIn[0].idIncomingFrames = "291"
++*.sender.sourceApp[0].idDataFrames = "291"
++*.sender.sourceApp[0].periodicityDataFrames = "0.01"
++*.sender.sourceApp[0].initialDataFrameOffset = "0"
++*.sender.sourceApp[0].dataLengthDataFrames = "64"
++*.sender.sourceApp[0].fd = true
++*.sender.sourceApp[0].bitRateSwitch = false
++*.sender.sourceApp[0].extendedId = false
++
++[Config BRSOn]
++extends = BRSOff
++*.sender.sourceApp[0].bitRateSwitch = true
++
++[Config InvalidPayload]
++extends = BRSOff
++*.sender.sourceApp[0].dataLengthDataFrames = "63"
++
++[Config InvalidFdRemote]
++extends = BRSOff
++*.sender.sourceApp[0].idDataFrames = "0"
++*.sender.sourceApp[0].idRemoteFrames = "291"
++*.sender.sourceApp[0].periodicityRemoteFrames = "0.01"
++*.sender.sourceApp[0].initialRemoteFrameOffset = "0"
++*.sender.sourceApp[0].dataLengthRemoteFrames = "64"
+diff --git a/src/fico4omnet/linklayer/can/CanFrameTiming.h b/src/fico4omnet/linklayer/can/CanFrameTiming.h
+new file mode 100644
+index 0000000..402c4e1
+--- /dev/null
++++ b/src/fico4omnet/linklayer/can/CanFrameTiming.h
+@@ -0,0 +1,108 @@
++// SPDX-License-Identifier: BSD-3-Clause
++//
++// CAN and CAN FD timing helpers.  FiCo4OMNeT models stuffing with the existing
++// configurable percentage approximation; it is not a bit-exact CAN PHY model.
++
++#ifndef FICO4OMNET_CANFRAMETIMING_H_
++#define FICO4OMNET_CANFRAMETIMING_H_
++
++#include "fico4omnet/base/FiCo4OMNeT_Defs.h"
++#include "fico4omnet/linklayer/can/messages/CanDataFrame_m.h"
++
++namespace FiCo4OMNeT {
++
++class CanFrameTiming {
++public:
++    static unsigned int payloadLengthForDlc(unsigned int dlc) {
++        static const unsigned int lengths[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64};
++        if (dlc > 15)
++            throw omnetpp::cRuntimeError("Invalid CAN DLC %u; permitted values are 0..15.", dlc);
++        return lengths[dlc];
++    }
++
++    static unsigned int dlcForPayloadLength(unsigned int length) {
++        static const unsigned int lengths[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64};
++        for (unsigned int dlc = 0; dlc < 16; ++dlc)
++            if (lengths[dlc] == length)
++                return dlc;
++        throw omnetpp::cRuntimeError("Invalid CAN FD payload length %u; permitted lengths are 0..8, 12, 16, 20, 24, 32, 48, and 64 bytes.", length);
++    }
++
++    static void validateFrame(const CanDataFrame& frame) {
++        const unsigned int maxId = frame.getExtendedId() ? 0x1fffffffU : 0x7ffU;
++        if (frame.getCanID() > maxId)
++            throw omnetpp::cRuntimeError("CAN identifier %u exceeds the %s identifier range.", frame.getCanID(), frame.getExtendedId() ? "29-bit" : "11-bit");
++        if (frame.getFd()) {
++            if (frame.getRtr())
++                throw omnetpp::cRuntimeError("CAN FD remote frames are not supported.");
++            if (frame.getPayloadLength() != payloadLengthForDlc(frame.getDlc()))
++                throw omnetpp::cRuntimeError("CAN FD DLC %u does not encode payload length %u.", frame.getDlc(), frame.getPayloadLength());
++        }
++        else {
++            if (frame.getBrs())
++                throw omnetpp::cRuntimeError("Bit-rate switching requires a CAN FD frame.");
++            if (frame.getPayloadLength() > 8 || frame.getDlc() > 8 || frame.getDlc() != frame.getPayloadLength())
++                throw omnetpp::cRuntimeError("Classical CAN requires DLC and payload length from 0 through 8 bytes.");
++        }
++        if (frame.getPayloadBytesArraySize() != (frame.getRtr() ? 0 : frame.getPayloadLength()))
++            throw omnetpp::cRuntimeError("CAN payload byte array size does not match payloadLength.");
++    }
++
++    static unsigned int frameBitLength(const CanDataFrame& frame, double stuffingPercentage) {
++        validateStuffing(stuffingPercentage);
++        validateFrame(frame);
++        const unsigned int payloadBits = frame.getRtr() ? 0 : frame.getPayloadLength() * 8;
++        if (!frame.getFd()) {
++            const unsigned int arbitrationExtension = frame.getExtendedId() ? 20 : 0;
++            const unsigned int base = 47 + arbitrationExtension + payloadBits;
++            const unsigned int stuffable = 34 + arbitrationExtension + payloadBits;
++            return base + stuffingBits(stuffable, stuffingPercentage);
++        }
++        // CAN FD uses CRC-17 through 16 bytes and CRC-21 for 20..64 bytes.
++        // ISO CRC stuff-count/parity and fixed stuff bits are not represented separately.
++        // This is a fixed-overhead performance approximation, not an ISO wire encoder.
++        const unsigned int crcBits = frame.getPayloadLength() <= 16 ? 17 : 21;
++        const unsigned int arbitrationExtension = frame.getExtendedId() ? 20 : 0;
++        const unsigned int base = 54 + arbitrationExtension + payloadBits + (crcBits - 17);
++        // Approximate stuffing over SOF through CRC sequence, consistent with legacy FiCo.
++        const unsigned int stuffable = 39 + arbitrationExtension + payloadBits + crcBits;
++        return base + stuffingBits(stuffable, stuffingPercentage);
++    }
++
++    static unsigned int frameOverheadBits(const CanDataFrame& frame, double stuffingPercentage) {
++        return frameBitLength(frame, stuffingPercentage) - (frame.getRtr() ? 0 : frame.getPayloadLength() * 8);
++    }
++
++    static double transmissionTime(const CanDataFrame& frame, double arbitrationBitrate,
++                                   double dataBitrate, double stuffingPercentage) {
++        if (arbitrationBitrate <= 0 || dataBitrate <= 0)
++            throw omnetpp::cRuntimeError("CAN arbitration and data bitrates must be greater than zero.");
++        const unsigned int total = frameBitLength(frame, stuffingPercentage);
++        if (!frame.getFd() || !frame.getBrs())
++            return static_cast<double>(total) / arbitrationBitrate;
++        // The BRS data phase starts after the BRS bit and ends before ACK.  Stuffing is
++        // apportioned by raw bits, which is an explicit approximation rather than PHY simulation.
++        const unsigned int crcBits = frame.getPayloadLength() <= 16 ? 17 : 21;
++        const unsigned int rawTotal = 54 + (frame.getExtendedId() ? 20 : 0)
++                + frame.getPayloadLength() * 8 + (crcBits - 17);
++        const unsigned int nominalRaw = (frame.getExtendedId() ? 40 : 20) + 12;
++        const unsigned int stuffing = total - rawTotal;
++        const unsigned int nominalBits = nominalRaw + static_cast<unsigned int>(
++                (static_cast<unsigned long long>(stuffing) * nominalRaw) / rawTotal);
++        return static_cast<double>(nominalBits) / arbitrationBitrate
++                + static_cast<double>(total - nominalBits) / dataBitrate;
++    }
++
++private:
++    static void validateStuffing(double stuffingPercentage) {
++        if (stuffingPercentage < 0 || stuffingPercentage > 1)
++            throw omnetpp::cRuntimeError("bitStuffingPercentage must be in [0, 1].");
++    }
++    static unsigned int stuffingBits(unsigned int stuffableBits, double percentage) {
++        return static_cast<unsigned int>(((stuffableBits - 1) / 4) * percentage);
++    }
++};
++
++} // namespace FiCo4OMNeT
++
++#endif

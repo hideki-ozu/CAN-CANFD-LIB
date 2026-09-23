@@ -1,0 +1,836 @@
+diff --git a/src/signalsandgateways/applications/can/CanSinkGatewayApp.cc b/src/signalsandgateways/applications/can/CanSinkGatewayApp.cc
+index 048fbee..3739df6 100644
+--- a/src/signalsandgateways/applications/can/CanSinkGatewayApp.cc
++++ b/src/signalsandgateways/applications/can/CanSinkGatewayApp.cc
+@@ -1,52 +1,26 @@
+-//
+-// This program is free software: you can redistribute it and/or modify
+-// it under the terms of the GNU Lesser General Public License as published by
+-// the Free Software Foundation, either version 3 of the License, or
+-// (at your option) any later version.
+-// 
+-// This program is distributed in the hope that it will be useful,
+-// but WITHOUT ANY WARRANTY; without even the implied warranty of
+-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-// GNU Lesser General Public License for more details.
+-// 
+-// You should have received a copy of the GNU Lesser General Public License
+-// along with this program.  If not, see http://www.gnu.org/licenses/.
+-// 
+-
+-#include "CanSinkGatewayApp.h"
+-
+-//FiCo4OMNeT
+-#include "fico4omnet/buffer/can/CanInputBuffer.h"
+-//Auto-generated messages
+-#include "fico4omnet/linklayer/can/messages/CanDataFrame_m.h"
+-
+-using namespace FiCo4OMNeT;
+-
+-namespace SignalsAndGateways {
+-
+-Define_Module(CanSinkGatewayApp);
+-
+-void CanSinkGatewayApp::handleMessage(cMessage *msg) {
+-    if (msg->arrivedOn("controllerIn")) {
+-        bufferMessageCounter++;
+-        if (idle) {
+-            requestFrame();
+-        }
+-        delete msg;
+-    } else if (CanDataFrame *frame = dynamic_cast<CanDataFrame *>(msg)) {
+-        currentFrameID = frame->getCanID();
+-        bufferMessageCounter--;
+-        send(frame, "out");
+-    } else if (msg->isSelfMessage()) {
+-        CanInputBuffer *buffer = dynamic_cast<CanInputBuffer *>(getParentModule()->getSubmodule("bufferIn"));
+-        buffer->deleteFrame(currentFrameID);
+-        if (bufferMessageCounter > 0) {
+-            requestFrame();
+-        } else {
+-            idle = true;
+-        }
+-        delete msg;
+-    }
+-}
+-
+-}
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU Lesser General Public License for more details.
++//
++// You should have received a copy of the GNU Lesser General Public License
++// along with this program.  If not, see http://www.gnu.org/licenses/.
++//
++
++#include "CanSinkGatewayApp.h"
++#include "fico4omnet/linklayer/can/messages/CanDataFrame_m.h"
++namespace SignalsAndGateways {
++Define_Module(CanSinkGatewayApp);
++void CanSinkGatewayApp::handleMessage(omnetpp::cMessage *msg) {
++    // Current FiCo CanInputBuffer delivers complete frames directly; there is
++    // no controller notification/request handshake on this path.
++    auto frame=omnetpp::check_and_cast<FiCo4OMNeT::CanDataFrame *>(msg);
++    send(frame, "out");
++}
++}
+diff --git a/src/signalsandgateways/applications/can/CanSinkGatewayApp.h b/src/signalsandgateways/applications/can/CanSinkGatewayApp.h
+index 1329c14..2beb780 100644
+--- a/src/signalsandgateways/applications/can/CanSinkGatewayApp.h
++++ b/src/signalsandgateways/applications/can/CanSinkGatewayApp.h
+@@ -1,50 +1,50 @@
+-//
+-// This program is free software: you can redistribute it and/or modify
+-// it under the terms of the GNU Lesser General Public License as published by
+-// the Free Software Foundation, either version 3 of the License, or
+-// (at your option) any later version.
+-// 
+-// This program is distributed in the hope that it will be useful,
+-// but WITHOUT ANY WARRANTY; without even the implied warranty of
+-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-// GNU Lesser General Public License for more details.
+-// 
+-// You should have received a copy of the GNU Lesser General Public License
+-// along with this program.  If not, see http://www.gnu.org/licenses/.
+-// 
+-
+-#ifndef SIGNALSANDGATEWAYS_CANSINKGATEWAYAPP_H_
+-#define SIGNALSANDGATEWAYS_CANSINKGATEWAYAPP_H_
+-
+-//SignalsAndGateways
+-#include "signalsandgateways/base/SignalsAndGateways_Defs.h"
+-//FiCo4OMNeT
+-#include "fico4omnet/applications/can/sink/CanTrafficSinkAppBase.h"
+-
+-namespace SignalsAndGateways {
+-
+-using namespace omnetpp;
+-
+-/**
+- * @brief Source-Application for the CAN-Node
+- *
+- * This module receives a CanDataFrame and forwards it to the gateway.
+- *
+- * @author Sebastian Mueller
+- */
+-class CanSinkGatewayApp : public virtual FiCo4OMNeT::CanTrafficSinkAppBase
+-{
+-  protected:
+-    /**
+-     * @brief Handles incoming TransportMessages
+-     *
+-     * If the incoming message is a CanDataFrame, then the CanDataFrame is send to the upper layer gateway.
+-     *
+-     * @param msg The incoming message
+-     */
+-    void handleMessage(cMessage *msg) override;
+-};
+-
+-}
+-
+-#endif
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU Lesser General Public License for more details.
++//
++// You should have received a copy of the GNU Lesser General Public License
++// along with this program.  If not, see http://www.gnu.org/licenses/.
++//
++
++#ifndef SIGNALSANDGATEWAYS_CANSINKGATEWAYAPP_H_
++#define SIGNALSANDGATEWAYS_CANSINKGATEWAYAPP_H_
++
++//SignalsAndGateways
++#include <omnetpp.h>  // CAN adapter has no CoRE Ethernet dependency
++//FiCo4OMNeT
++#include "fico4omnet/applications/can/sink/CanTrafficSinkAppBase.h"
++
++namespace SignalsAndGateways {
++
++using namespace omnetpp;
++
++/**
++ * @brief Source-Application for the CAN-Node
++ *
++ * This module receives a CanDataFrame and forwards it to the gateway.
++ *
++ * @author Sebastian Mueller
++ */
++class CanSinkGatewayApp : public virtual FiCo4OMNeT::CanTrafficSinkAppBase
++{
++  protected:
++    /**
++     * @brief Handles incoming TransportMessages
++     *
++     * If the incoming message is a CanDataFrame, then the CanDataFrame is send to the upper layer gateway.
++     *
++     * @param msg The incoming message
++     */
++    void handleMessage(cMessage *msg) override;
++};
++
++}
++
++#endif
+diff --git a/src/signalsandgateways/applications/can/CanSourceGatewayApp.cc b/src/signalsandgateways/applications/can/CanSourceGatewayApp.cc
+index 2ac9bab..5457416 100644
+--- a/src/signalsandgateways/applications/can/CanSourceGatewayApp.cc
++++ b/src/signalsandgateways/applications/can/CanSourceGatewayApp.cc
+@@ -1,46 +1,29 @@
+-//
+-// This program is free software: you can redistribute it and/or modify
+-// it under the terms of the GNU Lesser General Public License as published by
+-// the Free Software Foundation, either version 3 of the License, or
+-// (at your option) any later version.
+-// 
+-// This program is distributed in the hope that it will be useful,
+-// but WITHOUT ANY WARRANTY; without even the implied warranty of
+-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-// GNU Lesser General Public License for more details.
+-// 
+-// You should have received a copy of the GNU Lesser General Public License
+-// along with this program.  If not, see http://www.gnu.org/licenses/.
+-// 
+-
+-#include "CanSourceGatewayApp.h"
+-
+-//FiCo4OMNeT
+-//Auto-generated messages
+-#include "fico4omnet/linklayer/can/messages/CanDataFrame_m.h"
+-
+-using namespace FiCo4OMNeT;
+-
+-namespace SignalsAndGateways {
+-
+-Define_Module(CanSourceGatewayApp);
+-
+-CanSourceGatewayApp::~CanSourceGatewayApp()
+-{
+-    outgoingDataFrames.clear();
+-}
+-
+-void CanSourceGatewayApp::handleMessage(cMessage *msg)
+-{
+-    if(msg->arrivedOn("in")){
+-        //quick & dirty for new statistics
+-        CanDataFrame* df = dynamic_cast<CanDataFrame*> (msg);
+-        df->setTimestamp(simTime());
+-        send(df, "out");
+-    } else {
+-        delete msg;
+-    }
+-
+-}
+-
+-}
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU Lesser General Public License for more details.
++//
++// You should have received a copy of the GNU Lesser General Public License
++// along with this program.  If not, see http://www.gnu.org/licenses/.
++//
++
++#include "CanSourceGatewayApp.h"
++#include "fico4omnet/linklayer/can/CanFrameTiming.h"
++namespace SignalsAndGateways {
++Define_Module(CanSourceGatewayApp);
++CanSourceGatewayApp::~CanSourceGatewayApp() {}
++void CanSourceGatewayApp::handleMessage(omnetpp::cMessage *msg) {
++    if (!msg->arrivedOn("in"))
++        throw omnetpp::cRuntimeError("Gateway CAN source accepts only forwarded frames");
++    auto frame=omnetpp::check_and_cast<FiCo4OMNeT::CanDataFrame *>(msg);
++    FiCo4OMNeT::CanFrameTiming::validateFrame(*frame);
++    // Preserve the originating timestamp for end-to-end latency measurement.
++    send(frame, "out");
++}
++}
+diff --git a/src/signalsandgateways/applications/can/CanSourceGatewayApp.h b/src/signalsandgateways/applications/can/CanSourceGatewayApp.h
+index 8784c1f..b39ee10 100644
+--- a/src/signalsandgateways/applications/can/CanSourceGatewayApp.h
++++ b/src/signalsandgateways/applications/can/CanSourceGatewayApp.h
+@@ -1,55 +1,55 @@
+-//
+-// This program is free software: you can redistribute it and/or modify
+-// it under the terms of the GNU Lesser General Public License as published by
+-// the Free Software Foundation, either version 3 of the License, or
+-// (at your option) any later version.
+-// 
+-// This program is distributed in the hope that it will be useful,
+-// but WITHOUT ANY WARRANTY; without even the implied warranty of
+-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-// GNU Lesser General Public License for more details.
+-// 
+-// You should have received a copy of the GNU Lesser General Public License
+-// along with this program.  If not, see http://www.gnu.org/licenses/.
+-// 
+-
+-#ifndef SIGNALSANDGATEWAYS_CANSOURCEGATEWAYAPP_H_
+-#define SIGNALSANDGATEWAYS_CANSOURCEGATEWAYAPP_H_
+-
+-//SignalsAndGateways
+-#include "signalsandgateways/base/SignalsAndGateways_Defs.h"
+-//FiCo4OMNeT
+-#include "fico4omnet/applications/can/source/CanTrafficSourceAppBase.h"
+-
+-namespace SignalsAndGateways {
+-
+-using namespace omnetpp;
+-
+-/**
+- * @brief Source-Application for the CAN-Node
+- *
+- * This module receives CanDataFrames from the gateway and forwards it to the CAN-bus.
+- *
+- * @author Sebastian Mueller
+- */
+-class CanSourceGatewayApp : public FiCo4OMNeT::CanTrafficSourceAppBase
+-{
+-  public:
+-    /**
+-     * @brief Destructor of CanSourceGatewayApp
+-     */
+-    virtual ~CanSourceGatewayApp() override;
+-  protected:
+-    /**
+-     * @brief Handles incoming TransportMessages
+-     *
+-     * If the incoming message is a CanDataFrame, then the CanDataFrame is forwarded to the CAN-bus.
+-     *
+-     * @param msg The incoming message
+-     */
+-    virtual void handleMessage(cMessage *msg) override;
+-};
+-
+-}
+-
+-#endif
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU Lesser General Public License for more details.
++//
++// You should have received a copy of the GNU Lesser General Public License
++// along with this program.  If not, see http://www.gnu.org/licenses/.
++//
++
++#ifndef SIGNALSANDGATEWAYS_CANSOURCEGATEWAYAPP_H_
++#define SIGNALSANDGATEWAYS_CANSOURCEGATEWAYAPP_H_
++
++//SignalsAndGateways
++#include <omnetpp.h>  // CAN adapter has no CoRE Ethernet dependency
++//FiCo4OMNeT
++#include "fico4omnet/applications/can/source/CanTrafficSourceAppBase.h"
++
++namespace SignalsAndGateways {
++
++using namespace omnetpp;
++
++/**
++ * @brief Source-Application for the CAN-Node
++ *
++ * This module receives CanDataFrames from the gateway and forwards it to the CAN-bus.
++ *
++ * @author Sebastian Mueller
++ */
++class CanSourceGatewayApp : public FiCo4OMNeT::CanTrafficSourceAppBase
++{
++  public:
++    /**
++     * @brief Destructor of CanSourceGatewayApp
++     */
++    virtual ~CanSourceGatewayApp() override;
++  protected:
++    /**
++     * @brief Handles incoming TransportMessages
++     *
++     * If the incoming message is a CanDataFrame, then the CanDataFrame is forwarded to the CAN-bus.
++     *
++     * @param msg The incoming message
++     */
++    virtual void handleMessage(cMessage *msg) override;
++};
++
++}
++
++#endif
+diff --git a/Makefile.inet4 b/Makefile.inet4
+new file mode 100644
+index 0000000..88090f0
+--- /dev/null
++++ b/Makefile.inet4
+@@ -0,0 +1,8 @@
++# Focused native FiCo CAN adapters + INET4 packet gateway; legacy modules excluded.
++INET_ROOT ?= $(abspath ../inet)
++FICO_ROOT ?= $(abspath ../FiCo4OMNeT)
++.PHONY: all makefiles
++all: makefiles
++	$(MAKE) -C src-inet4 MODE=release
++makefiles:
++	cd src-inet4 && opp_makemake -f --deep --make-so -o SignalsAndGateways_INET4 -O out -I. -I../src -I../src/signalsandgateways/applications/can -I$(INET_ROOT)/src -I$(FICO_ROOT)/src -L$(INET_ROOT)/src -lINET -L$(FICO_ROOT)/src -lFiCo4OMNeT
+diff --git a/src-inet4/signalsandgateways/inet4/CanEthernetApp.ned b/src-inet4/signalsandgateways/inet4/CanEthernetApp.ned
+new file mode 100644
+index 0000000..a98731a
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/CanEthernetApp.ned
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++package signalsandgateways.inet4;
++import inet.applications.contract.IApp;
++import inet.applications.ethernet.EthernetSocketIo;
++import fico4omnet.applications.ISinkApplication;
++
++simple CanEthernetBridge {
++    parameters:
++        double processingDelay @unit(s) = default(5us);
++        double bitStuffingPercentage = default(0);
++        @signal[canToEthernet](type=omnetpp::cPacket);
++        @signal[ethernetToCan](type=omnetpp::cPacket);
++        @signal[gatewayLatency](type=simtime_t);
++        @statistic[gatewayLatency](record=vector,stats);
++    gates:
++        input canIn;
++        output canOut;
++        input ethernetIn;
++        output ethernetOut;
++}
++module CanEthernetApp like IApp {
++    parameters:
++        string interfaceTableModule;
++        string localAddress;
++        string remoteAddress;
++        string interface = default("eth0");
++        double processingDelay @unit(s) = default(5us);
++        double bitStuffingPercentage = default(0);
++        @display("i=block/app");
++    gates:
++        input socketIn;
++        output socketOut;
++        input canIn;
++        output canOut;
++    submodules:
++        bridge: CanEthernetBridge {
++            processingDelay = parent.processingDelay;
++            bitStuffingPercentage = parent.bitStuffingPercentage;
++            @display("p=150,100");
++        }
++        io: EthernetSocketIo {
++            interfaceTableModule = absPath(parent.interfaceTableModule);
++            interface = parent.interface;
++            localAddress = parent.localAddress;
++            remoteAddress = parent.remoteAddress;
++            @display("p=150,230");
++        }
++    connections:
++        canIn --> bridge.canIn;
++        bridge.canOut --> canOut;
++        bridge.ethernetOut --> io.trafficIn;
++        io.trafficOut --> bridge.ethernetIn;
++        socketIn --> io.socketIn;
++        io.socketOut --> socketOut;
++}
++simple AuditCanSink like ISinkApplication {
++    parameters:
++        bool verifyPattern = default(true);
++        @signal[received](type=omnetpp::cPacket);
++        @signal[canId](type=long);
++        @signal[endToEndDelay](type=simtime_t);
++        @statistic[canId](record=vector);
++        @statistic[endToEndDelay](record=vector,stats);
++    gates:
++        input controllerIn @directIn;
++        input dataIn @directIn;
++}
+diff --git a/src-inet4/signalsandgateways/inet4/CanEthernetBridge.cc b/src-inet4/signalsandgateways/inet4/CanEthernetBridge.cc
+new file mode 100644
+index 0000000..6c12b54
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/CanEthernetBridge.cc
+@@ -0,0 +1,131 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++// Local INET4 gateway boundary; native FiCo bus/ports remain in use.
++#include <omnetpp.h>
++#include <map>
++#include "inet/common/packet/Packet.h"
++#include "CanEthernetPayload_m.h"
++#include "fico4omnet/linklayer/can/messages/CanDataFrame_m.h"
++#include "fico4omnet/linklayer/can/CanFrameTiming.h"
++using namespace omnetpp;
++using namespace inet;
++using namespace FiCo4OMNeT;
++namespace SignalsAndGateways {
++class CanEthernetBridge : public cSimpleModule {
++    long sent = 0, received = 0;
++    uint64_t sequence = 0;
++    simsignal_t txSignal, rxSignal, latencySignal;
++    virtual void initialize() override {
++        txSignal = registerSignal("canToEthernet");
++        rxSignal = registerSignal("ethernetToCan");
++        latencySignal = registerSignal("gatewayLatency");
++        if (par("processingDelay").doubleValue() < 0)
++            throw cRuntimeError("processingDelay must be nonnegative");
++    }
++    virtual void handleMessage(cMessage *msg) override {
++        if (msg->arrivedOn("canIn")) {
++            auto frame = check_and_cast<CanDataFrame *>(msg);
++            CanFrameTiming::validateFrame(*frame);
++            if (frame->getRtr())
++                throw cRuntimeError("CAN-over-Ethernet adapter supports data frames only");
++            if (frame->getPayloadBytesArraySize() != frame->getPayloadLength())
++                throw cRuntimeError("CAN payload bytes/length mismatch");
++            auto chunk = makeShared<CanEthernetPayload>();
++            // Logical tunnel header: identifier/flags/DLC/length/sequence/time (24B).
++            // This is a simulation protocol, not an automotive wire standard.
++            chunk->setChunkLength(B(24 + frame->getPayloadLength()));
++            chunk->setCanId(frame->getCanID());
++            chunk->setFd(frame->getFd());
++            chunk->setBrs(frame->getBrs());
++            chunk->setExtendedId(frame->getExtendedId());
++            chunk->setRtr(frame->getRtr());
++            chunk->setDlc(frame->getDlc());
++            chunk->setPayloadLength(frame->getPayloadLength());
++            chunk->setSequence(sequence++);
++            chunk->setSourceTime(frame->getTimestamp());
++            chunk->setPayloadBytesArraySize(frame->getPayloadBytesArraySize());
++            for (size_t i=0; i<frame->getPayloadBytesArraySize(); ++i)
++                chunk->setPayloadBytes(i, frame->getPayloadBytes(i));
++            auto packet = new Packet("CAN-over-Ethernet");
++            packet->insertAtBack(chunk);
++            emit(txSignal, frame);
++            ++sent;
++            delete frame;
++            sendDelayed(packet, par("processingDelay"), "ethernetOut");
++        }
++        else if (msg->arrivedOn("ethernetIn")) {
++            auto packet = check_and_cast<Packet *>(msg);
++            const auto& chunk = packet->peekAtFront<CanEthernetPayload>();
++            auto frame = new CanDataFrame("CAN-from-Ethernet");
++            frame->setCanID(chunk->getCanId());
++            frame->setFd(chunk->getFd());
++            frame->setBrs(chunk->getBrs());
++            frame->setExtendedId(chunk->getExtendedId());
++            frame->setRtr(chunk->getRtr());
++            frame->setDlc(chunk->getDlc());
++            frame->setPayloadLength(chunk->getPayloadLength());
++            frame->setTimestamp(chunk->getSourceTime());
++            frame->setPayloadBytesArraySize(chunk->getPayloadBytesArraySize());
++            for (size_t i=0; i<chunk->getPayloadBytesArraySize(); ++i)
++                frame->setPayloadBytes(i, chunk->getPayloadBytes(i));
++            CanFrameTiming::validateFrame(*frame);
++            if (frame->getRtr())
++                throw cRuntimeError("CAN-over-Ethernet adapter supports data frames only");
++            if (frame->getPayloadBytesArraySize() != frame->getPayloadLength())
++                throw cRuntimeError("Ethernet tunnel payload bytes/length mismatch");
++            auto payload = new cPacket("CAN-payload");
++            payload->setByteLength(frame->getPayloadLength());
++            payload->setTimestamp(frame->getTimestamp());
++            frame->encapsulate(payload);
++            frame->setBitLength(CanFrameTiming::frameBitLength(*frame, par("bitStuffingPercentage")));
++            emit(rxSignal, frame);
++            emit(latencySignal, simTime() - frame->getTimestamp());
++            ++received;
++            delete packet;
++            sendDelayed(frame, par("processingDelay"), "canOut");
++        }
++        else throw cRuntimeError("Unexpected gateway input: %s", msg->getName());
++    }
++    virtual void finish() override {
++        recordScalar("canToEthernet", sent);
++        recordScalar("ethernetToCan", received);
++    }
++};
++Define_Module(CanEthernetBridge);
++
++// Audit receiving ECUs: verifies actual modeled bytes after both CAN buses.
++class AuditCanSink : public cSimpleModule {
++    long received = 0, bytes = 0;
++    std::map<unsigned int, cStdDev> delays;
++    simsignal_t rxSignal, idSignal, latencySignal;
++    virtual void initialize() override {
++        rxSignal=registerSignal("received");
++        idSignal=registerSignal("canId");
++        latencySignal=registerSignal("endToEndDelay");
++    }
++    virtual void handleMessage(cMessage *message) override {
++        auto frame=check_and_cast<CanDataFrame *>(message);
++        CanFrameTiming::validateFrame(*frame);
++        if(frame->getPayloadBytesArraySize()!=frame->getPayloadLength())
++            throw cRuntimeError("End-to-end payload length mismatch");
++        if(par("verifyPattern").boolValue())
++            for(size_t i=0; i<frame->getPayloadBytesArraySize(); ++i)
++                if(frame->getPayloadBytes(i)!=((frame->getCanID()+i)&255))
++                    throw cRuntimeError("End-to-end CAN payload corrupted");
++        ++received; bytes+=frame->getPayloadLength();
++        delays[frame->getCanID()].collect((simTime()-frame->getTimestamp()).dbl());
++        emit(rxSignal, frame); emit(idSignal, static_cast<long>(frame->getCanID()));
++        emit(latencySignal, simTime()-frame->getTimestamp());
++        delete frame;
++    }
++    virtual void finish() override {
++        recordScalar("receivedFrames",received);
++        recordScalar("receivedPayloadBytes",bytes);
++        for (auto& entry : delays) {
++            const std::string name="id_"+std::to_string(entry.first);
++            recordScalar((name+"_delayMean").c_str(),entry.second.getMean());
++            recordScalar((name+"_received").c_str(),entry.second.getCount());
++        }
++    }
++};
++Define_Module(AuditCanSink);
++}
+diff --git a/src-inet4/signalsandgateways/inet4/CanEthernetPayload.msg b/src-inet4/signalsandgateways/inet4/CanEthernetPayload.msg
+new file mode 100644
+index 0000000..12bd55c
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/CanEthernetPayload.msg
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++import inet.common.INETDefs;
++import inet.common.packet.chunk.Chunk;
++namespace SignalsAndGateways;
++class CanEthernetPayload extends inet::FieldsChunk
++{
++    unsigned int canId;
++    bool fd;
++    bool brs;
++    bool extendedId;
++    bool rtr;
++    unsigned int dlc;
++    unsigned int payloadLength;
++    uint64_t sequence;
++    simtime_t sourceTime;
++    uint8_t payloadBytes[];
++}
+diff --git a/src-inet4/signalsandgateways/inet4/CanGatewayNode.ned b/src-inet4/signalsandgateways/inet4/CanGatewayNode.ned
+new file mode 100644
+index 0000000..4de4e99
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/CanGatewayNode.ned
+@@ -0,0 +1,86 @@
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++// 
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU Lesser General Public License for more details.
++// 
++// You should have received a copy of the GNU Lesser General Public License
++// along with this program.  If not, see http://www.gnu.org/licenses/.
++// 
++
++package signalsandgateways.inet4;
++
++import fico4omnet.linklayer.can.CanNodePort;
++import fico4omnet.buffer.can.CanInputBuffer;
++import fico4omnet.buffer.can.CanOutputBuffer;
++import fico4omnet.applications.ISourceApplication;
++import fico4omnet.applications.ISinkApplication;
++import fico4omnet.scheduler.can.CanClock;
++
++//
++// Participant of the Gateway. Represents the CAN port of a gateway.
++//
++// Forwards data, remote and error frames.
++//
++// @see ~CanNodePort, ~CanInputBuffer, ~CanOutputBuffer, ~CanSourceGatewayApp, ~CanSinkGatewayApp, ~CanClock
++//
++// @author Sebastian Mueller
++//
++module CanGatewayNode
++{
++    parameters:
++        @display("i=block/app2;bgb=248,222");
++        
++        // If errors are enabled: percentage of errors
++        int errorperc = default(0);							
++        
++    gates:
++        inout gate;
++        output upperLayerOut;
++        input upperLayerIn;
++
++    submodules:
++        canNodePort: CanNodePort {
++            @display("p=149,168");
++            gates:
++                phygate;
++        }
++        
++        bufferIn[1]: CanInputBuffer {
++            @display("p=203,102");
++            gates:
++                in[1];
++        }
++        
++        bufferOut: CanOutputBuffer {
++            @display("p=98,102");
++            MOB = false;
++            gates:
++                in[1];
++        }
++        
++        sourceApp[1]: CanSourceGatewayApp {
++            @display("p=98,32,row,70");
++        }
++        
++        sinkApp[1]: CanSinkGatewayApp {
++            @display("p=203,32");
++        }
++        
++        canClock: CanClock {
++            @display("p=149,102");
++        }
++        
++    connections:
++        canNodePort.phygate <--> gate;
++        canNodePort.upperLayerIn <-- bufferOut.out;
++        sourceApp[0].out --> bufferOut.in[0];
++        
++        sinkApp[0].out --> upperLayerOut;
++        sourceApp[0].in <-- upperLayerIn;
++}
+diff --git a/src-inet4/signalsandgateways/inet4/CanSinkGatewayApp.cc b/src-inet4/signalsandgateways/inet4/CanSinkGatewayApp.cc
+new file mode 120000
+index 0000000..5c7ed11
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/CanSinkGatewayApp.cc
+@@ -0,0 +1 @@
++../../../src/signalsandgateways/applications/can/CanSinkGatewayApp.cc
+\ No newline at end of file
+diff --git a/src-inet4/signalsandgateways/inet4/CanSinkGatewayApp.ned b/src-inet4/signalsandgateways/inet4/CanSinkGatewayApp.ned
+new file mode 100644
+index 0000000..9787956
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/CanSinkGatewayApp.ned
+@@ -0,0 +1,35 @@
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++// 
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU Lesser General Public License for more details.
++// 
++// You should have received a copy of the GNU Lesser General Public License
++// along with this program.  If not, see http://www.gnu.org/licenses/.
++// 
++
++package signalsandgateways.inet4;
++
++import fico4omnet.applications.can.sink.CanTrafficSinkAppBase;
++
++//
++// This module receives a CanDataFrame and forwards it to the gateway.
++//
++// @see ~CanTrafficSinkAppBase
++//
++// @author Sebastian Mueller
++//
++simple CanSinkGatewayApp extends CanTrafficSinkAppBase
++{
++    parameters:
++        @class(CanSinkGatewayApp);
++        
++    gates:     
++        //Connection to the gateway    
++        output out @labels(DataFrame);
++}
+diff --git a/src-inet4/signalsandgateways/inet4/CanSourceGatewayApp.cc b/src-inet4/signalsandgateways/inet4/CanSourceGatewayApp.cc
+new file mode 120000
+index 0000000..e428af6
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/CanSourceGatewayApp.cc
+@@ -0,0 +1 @@
++../../../src/signalsandgateways/applications/can/CanSourceGatewayApp.cc
+\ No newline at end of file
+diff --git a/src-inet4/signalsandgateways/inet4/CanSourceGatewayApp.ned b/src-inet4/signalsandgateways/inet4/CanSourceGatewayApp.ned
+new file mode 100644
+index 0000000..1dd153d
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/CanSourceGatewayApp.ned
+@@ -0,0 +1,35 @@
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++// 
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU Lesser General Public License for more details.
++// 
++// You should have received a copy of the GNU Lesser General Public License
++// along with this program.  If not, see http://www.gnu.org/licenses/.
++// 
++
++package signalsandgateways.inet4;
++
++import fico4omnet.applications.can.source.CanTrafficSourceAppBase;
++
++//
++// This module receives CanDataFrames from the gateway and forwards it to the CAN-bus.
++//
++// @see ~CanTrafficSourceAppBase
++//
++// @author Sebastian Mueller
++//
++simple CanSourceGatewayApp extends CanTrafficSourceAppBase
++{
++    parameters:
++        @class(CanSourceGatewayApp);
++        
++    gates:
++    	//Connection to the gateway   
++        input in @labels(DataFrame);
++}
+diff --git a/src-inet4/signalsandgateways/inet4/package.ned b/src-inet4/signalsandgateways/inet4/package.ned
+new file mode 100644
+index 0000000..5d935df
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/package.ned
+@@ -0,0 +1 @@
++package signalsandgateways.inet4;
+diff --git a/src-inet4/signalsandgateways/package.ned b/src-inet4/signalsandgateways/package.ned
+new file mode 100644
+index 0000000..878b59c
+--- /dev/null
++++ b/src-inet4/signalsandgateways/package.ned
+@@ -0,0 +1,3 @@
++package signalsandgateways;
++@namespace(SignalsAndGateways);
++@license(LGPL);

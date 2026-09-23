@@ -1,0 +1,18 @@
+# Workspace-local OMNeT++ runtime configuration.
+PREFER_CLANG=no
+CXXFLAGS=-std=c++17
+WITH_PYTHON=no
+WITH_QTENV=yes
+WITH_OSG=no
+WITH_OSGEARTH=no
+WITH_NETBUILDER=yes
+WITH_SCAVE_PYTHON_BINDINGS=no
+WITH_LIBXML=no
+WITH_PARSIM=no
+PREFER_SQLITE_RESULT_FILES=no
+WITH_SYSTEMC=no
+WITH_BACKTRACE=yes
+SHARED_LIBS=yes
+USE_CCACHE_PREFIX=yes
+QMAKE="$OMNETPP_LOCAL_DEPS/../../scripts/qmake6-local.sh"
+QT_CFLAGS="-isystem $OMNETPP_LOCAL_DEPS/usr/include -isystem $OMNETPP_LOCAL_DEPS/usr/include/x86_64-linux-gnu/qt6"

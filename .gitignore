@@ -1,0 +1,13 @@
+/tools/
+/downloads/
+/.local/
+/logs/
+/upstream/
+/results/
+**/results/
+**/__pycache__/
+**/.qtenvrc
+/.serena/
+/.claude/
+/.env
+/.env.*

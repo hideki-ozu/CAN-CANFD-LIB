@@ -1,0 +1,28 @@
+{
+  "verified_on": "2026-09-23",
+  "repositories": {
+    "inet": {
+      "url": "https://github.com/inet-framework/inet.git",
+      "commit": "dfe270b21f38856874e3ba50ef964bd557e4bb99"
+    },
+    "CoRE4INET": {
+      "url": "https://github.com/CoRE-RG/CoRE4INET.git",
+      "commit": "55439ae79b0960b345b68d2bfb04eb499b384969"
+    },
+    "FiCo4OMNeT": {
+      "url": "https://github.com/CoRE-RG/FiCo4OMNeT.git",
+      "commit": "c4e15633ee5ab66d32b86a3b8d81835c9970ac3a"
+    },
+    "SignalsAndGateways": {
+      "url": "https://github.com/CoRE-RG/SignalsAndGateways.git",
+      "commit": "017de33f2d04005371b77d55617f0f570143830c"
+    }
+  },
+  "omnetpp": {
+    "version": "6.4.0",
+    "directory": "omnetpp-6.4.0",
+    "archive": "omnetpp-6.4.0-linux-x86_64.tgz",
+    "url": "https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.4.0/omnetpp-6.4.0-linux-x86_64.tgz",
+    "sha256": "2dd2cfbd388e50e843f5713716f065e878df7bb104b69f3435f740b37b21d459"
+  }
+}
