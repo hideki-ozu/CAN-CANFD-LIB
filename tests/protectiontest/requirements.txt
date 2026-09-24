@@ -1,0 +1,11 @@
+# Test-only reference implementations for tests/test_protection.py (never linked into
+# simulations): autosar-e2e (MIT) for the E2E profiles, pycryptodome (BSD-2-Clause /
+# public domain) for AES-128-CMAC independent of OpenSSL.
+autosar-e2e==1.0.0 \
+    --hash=sha256:54486c97eece79804b37cf4d7ec09db1f08b933197c0e4d869e18058308ff824 \
+    --hash=sha256:8c7a87043b44046450fe515080a6e3423848477dae372eea6b4cb8ad248aead4 \
+    --hash=sha256:e740c9896000a164769c8d4294cdb0504b76d7728e571e11d2e8c1d69967d932
+pycryptodome==3.23.0 \
+    --hash=sha256:c8987bd3307a39bc03df5c8e0e3d8be0c4c3518b7f044b0f4c15d1aa78f52575 \
+    --hash=sha256:67bd81fcbe34f43ad9422ee8fd4843c8e7198dd88dd3d40e6de42ee65fbe1490 \
+    --hash=sha256:447700a657182d60338bab09fdb27518f8856aecd80ae4c6bdddb67ff5da44ef

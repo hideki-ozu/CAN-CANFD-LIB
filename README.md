@@ -4,7 +4,7 @@
 
 対象は **OMNeT++ 6.4.0 / INET 4.7.0 / Linux・WSL2**。通常のセットアップは既存OMNeT++の設定・ソース・ビルド成果物を変更せず、管理者権限も使いません。INETやCoRE関連ライブラリが未導入の状態から実行できます。
 
-**対応範囲:** CAN本体の **FiCo4OMNeT** をCAN-FD対応に改修し、SignalsAndGatewaysをINET4へ接続しています。CAN/CAN-FDのEthernet転送は、独自ヘッダに加えて **IEEE 1722 AVTP**（NTSCF/TSCF + ACF CAN/CAN Brief、EtherType 0x22F0）に対応します（[詳細](docs/AVTP.md)）。サービス指向通信として、**SOA4CoREのSOME/IP・SOME/IP-SD**をINET4へ移植しています（[詳細](docs/SOMEIP.md)）。CoRE4INETは既存 `BGTrafficSourceApp` の選択移植です。旧CoRE4INET全体の移植ではなく、AS6802/TTEthernet、旧AVB/SRP、旧Qbv等は未移植です。CAN-FDの時間計算はイベント単位の近似です。[詳細](docs/CORE_PORT.md)
+**対応範囲:** CAN本体の **FiCo4OMNeT** をCAN-FD対応に改修し、SignalsAndGatewaysをINET4へ接続しています。CAN/CAN-FDのEthernet転送は、独自ヘッダに加えて **IEEE 1722 AVTP**（NTSCF/TSCF + ACF CAN/CAN Brief、EtherType 0x22F0）に対応します（[詳細](docs/AVTP.md)）。サービス指向通信として、**SOA4CoREのSOME/IP・SOME/IP-SD**をINET4へ移植しています（[詳細](docs/SOMEIP.md)）。CAN/CAN-FDフレームとSOME/IPイベントには **AUTOSAR E2E**（Profile 1/2/4/5/7、状態機械）と **SecOC**（AES-128-CMAC、フレッシュネス値）を付けられます（[詳細](docs/PROTECTION.md)）。CoRE4INETは既存 `BGTrafficSourceApp` の選択移植です。旧CoRE4INET全体の移植ではなく、AS6802/TTEthernet、旧AVB/SRP、旧Qbv等は未移植です。CAN-FDの時間計算はイベント単位の近似です。[詳細](docs/CORE_PORT.md)
 
 ## Claude Codeにセットアップを依頼する
 
@@ -29,8 +29,9 @@ INETと各CoREソースの取得、パッチ適用、releaseビルド、CAN単�
 | OS | Ubuntu 24.04 x86_64 / WSL2で検証。その他Linuxは未検証。Windowsネイティブ・macOSはセットアップ対象外 |
 | OMNeT++ | **6.4.0**、release共有ライブラリがビルド済み。`setenv` と `Makefile.inc` がある開発用インストール |
 | ツール | Bash、Git、GNU make、Python **3.10以上**（`venv`モジュール付き）、そのOMNeT++を構築したC++コンパイラ（g++またはclang++等）、AVTP試験用のCコンパイラ（`cc`/gcc/clang） |
+| OpenSSL | **OpenSSL 3** の開発ファイル（libcryptoのヘッダ。Debian/Ubuntuは `libssl-dev`）。SecOCのAES-128-CMACに使用。sudoで導入できない場合は `scripts/fetch-openssl-dev.sh`（Debian/Ubuntu、インストール済みlibssl3と同じ版のヘッダを `.local/` に展開）または `OPENSSL_CFLAGS`/`OPENSSL_LIBS` を指定 |
 | OMNeT++ツール | `opp_run`、`opp_makemake`、`opp_msgc`。標準サンプルが実行でき、モデルをコンパイルできる環境 |
-| 通信 | GitHubから公開ソースを取得できること。SOME/IP試験の初回にPyPIからScapy 2.6.1（ハッシュ固定）を `.local/` のvenvへ取得。アカウントやトークンは不要 |
+| 通信 | GitHubから公開ソースを取得できること。試験の初回にPyPIからScapy 2.6.1（SOME/IP試験）、autosar-e2e 1.0.0とpycryptodome 3.23.0（E2E/SecOC試験）をハッシュ固定で `.local/` のvenvへ取得。アカウントやトークンは不要 |
 | 容量・メモリ | 空きディスク目安5GB以上。並列数は既定4。メモリが少ない場合は `BUILD_JOBS=2` または1 |
 | GUI（任意） | Qtenvがビルド済みで、X11/WaylandまたはWSLgが利用可能。CLIテストにGUIは不要 |
 | パス | リポジトリとOMNeT++のパスに空白を含めないこと |
@@ -57,11 +58,11 @@ BUILD_JOBS=4 ./scripts/setup.sh 2>&1 | tee logs/setup.log
 
 セットアップは次の順に実行します。
 
-1. バージョン、共有ライブラリ構成、コンパイラ、必要コマンド、`opp_run` の実行を確認。
+1. バージョン、共有ライブラリ構成、コンパイラ、必要コマンド、`opp_run` の実行、OpenSSL 3（CMAC）のコンパイル・リンクを確認。
 2. `sources.lock.json` のコミットでINET、FiCo4OMNeT、CoRE4INET、SignalsAndGateways、SOA4CoRE、Open1722（AVTP試験専用の参照デコーダ。シミュレーションにはリンクしない）を `upstream/` に取得。
 3. `patches/` の改修を適用。適用済みなら再適用せず、異なるコミットや競合する変更があれば停止。
-4. INETと4つの改修ライブラリを **MODE=release** でビルド。
-5. CAN単体の15項目、混在ネットワーク4構成、IEEE 1722 AVTPの検証（自己試験33項目・9構成（TSN・gPTPを含む）・pcap/Open1722照合・異常系4件）、SOME/IPの検証（自己試験19項目・4構成・pcap/Scapy照合・異常系3件）を実行。
+4. INETと4つの改修ライブラリ、本リポジトリのAUTOSAR保護ライブラリ（`autosar/`）を **MODE=release** でビルド。
+5. CAN単体の15項目、混在ネットワーク4構成、IEEE 1722 AVTPの検証（自己試験33項目・9構成（TSN・gPTPを含む）・pcap/Open1722照合・異常系4件）、SOME/IPの検証（自己試験19項目・4構成・pcap/Scapy照合・異常系3件）、E2E/SecOCの検証（自己試験111項目・参照実装照合320件・CAN 6構成・SOME/IP 4構成・pcap照合・故障注入）を実行。
 
 使用したOMNeT++のパスは、Git管理外の `.local/omnetpp-root` に保存します。次の端末でも起動スクリプトが参照します。`OMNETPP_ROOT` の明示指定が最優先です。
 
@@ -76,7 +77,9 @@ BUILD_JOBS=4 ./scripts/setup.sh 2>&1 | tee logs/setup.log
 ./scripts/run-gui.sh Mixed         # Qtenvを開く。Runボタンで開始
 ./scripts/run-mixed.sh AvtpTscf    # IEEE 1722 TSCFでCAN/CAN-FDを転送
 ./scripts/run-someip.sh SomeIpTcpUdp   # SOME/IP-SDで発見・購読しSOME/IPで通知（GUI: run-someip-gui.sh）
-make test                         # 動作確認を再実行（個別は make test-avtp / make test-someip）
+./scripts/run-mixed.sh E2eSecOcAvtp    # CAN/CAN-FDをE2E + SecOCで保護し、IEEE 1722で転送
+./scripts/run-someip.sh SomeIpE2eSecOc # SOME/IPイベントをE2E P04 + SecOCで保護
+make test                         # 動作確認を再実行（個別は make test-avtp / make test-someip / make test-protection）
 ```
 
 | 設定 | 内容 |
@@ -94,6 +97,11 @@ make test                         # 動作確認を再実行（個別は make te
 | `AvtpTsn` | 同じ負荷をINET TSN上で実行。AVTPに802.1Q PCP 3/VID 2、スイッチでクレジットベースシェーパ |
 | `AvtpTsnGptp` | `AvtpTsn` + gPTP時刻同期（発振器±50ppm） |
 | `AvtpTsnFreeRunning` | 発振器±50ppmで時刻同期なし（比較用） |
+| `E2eSecOc` / `E2eSecOcAvtp` | Classical CANにE2E P01、CAN-FDにP05、どちらもSecOCで保護（独自トンネル／IEEE 1722） |
+| `E2eP02P07Avtp` | Classical CANにP02（SecOCなし）、CAN-FDにP07 + SecOC（MAC 128bit） |
+| `E2eSecOcFaults` / `E2eOnlyFaults` / `SecOcWrongKey` | 1bit誤り・再送・カウンタ飛び・鍵違いの故障注入（SecOCあり／E2Eのみ） |
+
+SOME/IP側（`run-someip.sh`）には `SomeIpE2eSecOc`、`SomeIpE2eP07Mcast`、`SomeIpE2eSecOcFaults`、`SomeIpSecOcWrongKey` があります。[docs/PROTECTION.md](docs/PROTECTION.md)
 
 例: `./scripts/run-mixed.sh LoadedEthernet`。GUIの例: `./scripts/run-gui.sh FdNoBrs`。
 
@@ -102,6 +110,7 @@ make test                         # 動作確認を再実行（個別は make te
 - `results/mixed/<設定>/`: OMNeT++の `.sca` / `.vec`。
 - `results/avtp/report.json`: AVTP自己試験（`failed: 0`）、9構成の送受信・ワイヤ検証、異常系、TSN比較の結果。
 - `results/someip/report.json`: SOME/IP自己試験（`failed: 0`）、3構成の配送・ワイヤ検証（Scapy照合）、TSN（PCP/VLAN）、異常系の結果。`results/someip/<設定>/Node*.pcap` はSOME/IP・SOME/IP-SDの記録。
+- `results/protection/report.json`: E2E/SecOC自己試験（`failed: 0`）、参照実装との照合件数、CAN・SOME/IPの各構成の配送数とE2E/SecOC判定の内訳、ワイヤ検証の結果。
 - `results/mixed/Avtp*/gatewayA.pcap`・`gatewayB.pcap`: AVTPフレームの記録（ナノ秒精度pcap）。
 - `logs/`: 混在テストのログ。CAN単体のログは `results/canfd/`。
 
@@ -120,6 +129,7 @@ Qtenvは2DシミュレーションGUIです。Eclipse IDEのインポートや�
 | パッチ・コミット不一致 | `upstream/<repo>` の差分を確認。作業を消す自動resetはしない。必要なら新しいフォルダへcloneして導入 |
 | 共有ライブラリが見つからない | 同じOMNeT++環境を有効にし、直接 `opp_run` ではなく同梱起動スクリプトを使用 |
 | Qtプラグイン／画面のエラー | まずCLIを使用。既存OMNeT++のQtenvとDISPLAY/WSLg設定を確認 |
+| `OpenSSL 3 development files ... are required` | `libssl-dev`（またはopenssl-devel）を導入するか、sudoなしなら `./scripts/fetch-openssl-dev.sh` を実行してから再開。既存の別パスのOpenSSLは `OPENSSL_CFLAGS="-I<include>"`・`OPENSSL_LIBS="-L<lib> -lcrypto"` で指定 |
 | `Qtenv is not available` | 既存OMNeT++がCLIのみの構成。CLIテストは可能。スクリプトは既存インストールを再構成しない |
 
 ビルド失敗後は同じセットアップコマンドで再開できます。OMNeT++のインストールやコンパイラを切り替える場合は、新しいcloneでビルドし、異なる環境の成果物を混在させないでください。
@@ -152,11 +162,12 @@ flowchart LR
 
 | clone | 改修内容 |
 |---|---|
-| `upstream/FiCo4OMNeT` | CAN-FDフィールド、DLC・ID検証、BRS、送受信共通時間計算、11/29bit仲裁、待ち行列、C++17対応 |
+| `upstream/FiCo4OMNeT` | CAN-FDフィールド、DLC・ID検証、BRS、送受信共通時間計算、11/29bit仲裁、待ち行列、C++17対応、送信直前にペイロードを書き換えるフック（E2E/SecOC用） |
 | `upstream/CoRE4INET` | 既存BGTrafficSourceAppをINET4 Packet/ChunkとEthernetSocketIoへ移植。`Makefile.inet4` で選択ビルド |
-| `upstream/SignalsAndGateways` | 既存CAN側アプリを改修、INET4 FieldsChunkによる双方向ゲートウェイと、IEEE 1722 AVTPゲートウェイ（`src-inet4/.../avtp/`）を追加。`Makefile.inet4` で選択ビルド |
+| `upstream/SignalsAndGateways` | 既存CAN側アプリを改修、INET4 FieldsChunkによる双方向ゲートウェイと、IEEE 1722 AVTPゲートウェイ（`src-inet4/.../avtp/`）、E2E/SecOCで保護するCAN送受信アプリ（`src-inet4/.../protection/`）を追加。`Makefile.inet4` で選択ビルド |
 | `upstream/inet` | 公式v4.7.0をビルド。独自のプロトコル改修なし |
-| `upstream/SOA4CoRE` | `src-inet4/` にSOME/IP・SOME/IP-SD経路をINET4へ移植（元の `src/` は未変更）。`Makefile.inet4` でビルド。AVB/SRP、QoSネゴシエーション、ゲートウェイ、同期パブリッシャは未移植 |
+| `upstream/SOA4CoRE` | `src-inet4/` にSOME/IP・SOME/IP-SD経路をINET4へ移植（元の `src/` は未変更）。`Makefile.inet4` でビルド。AVB/SRP、QoSネゴシエーション、ゲートウェイ、同期パブリッシャは未移植。SOME/IPエンドポイントでE2E/SecOC（`src-inet4/soa4core/protection/`） |
+| `autosar/`（本リポジトリ） | AUTOSAR CRCライブラリ、E2E P01/P02/P04/P05/P07と状態機械、SecOC（OpenSSL libcryptoのCMAC）。INETに依存しない共通ライブラリ `libAutosarProtection.so` |
 | `upstream/Open1722` | 試験専用。改修なし。`tests/avtp/open1722_decode.c` と組み合わせてpcapのAVTPDUを照合 |
 
 元の著作権・ライセンスを各cloneに保持しています。cloneの基準コミットと配布物SHA256は [sources.lock.json](sources.lock.json)、変更は [patches/](patches/) に保存しています。`upstream/` とビルド成果物をルートGitに重複登録せず、パッチから復元する構成です。
@@ -168,6 +179,7 @@ flowchart LR
 - ClassicalフレームとFDフレームが混在するバスのノードはFDを許容するものとして扱います。旧CAN専用ハードウェアがFDフレームをエラーにする挙動はありません。
 - FDのRTR、FDバス上の確率的エラー注入は明示的に拒否します。同一ID・同一形式の複数データ送信元による同時競合も、ビット衝突モデルがないため拒否します。同一送信元の待ち行列は許可します。
 - ゲートウェイはデータフレーム用です。CAN ID・FD/BRS・形式・DLC・ペイロード全バイト・生成時刻を保持します。既定の `CanEthernetApp` は24Bの独自シミュレーション用ヘッダで、実機の標準カプセル化仕様ではありません。宣言済みFCSのパケットシミュレーション専用です。
+- E2E/SecOCは送受信ECU（SOME/IPはエンドポイント）で処理し、ゲートウェイは透過です。E2E状態機械は単一ウィンドウ（R4.2相当）、SecOCの鍵はiniで静的に共有し、MACの計算時間は0として扱います。SecOCのFV復元手順とSOME/IPへの適用方法は仕様本文と未照合の部分があります。[docs/PROTECTION.md](docs/PROTECTION.md#未対応事項前提)
 - 標準形式が必要な場合は `AvtpCanGatewayApp`（IEEE 1722 AVTP）を使います。バイト精度のserializerを持ち、計算FCSとPCAP記録に対応します。INETのTSN機能（802.1Qタグ付け、クレジットベースシェーパ、gPTP）と組み合わせて使えます（`AvtpTsn*` 構成）。SRPプロトコル自体は静的設定で代替、ACF CAN v1形式のみです。[docs/AVTP.md](docs/AVTP.md)
 - Qtenv 2D表示は動作確認済みです。検証元のOMNeT++ではOSG・組込みPython・scave Pythonバインディングを無効にしていましたが、本リポジトリの通常セットアップは導入先の設定を変更しません。
 
@@ -182,6 +194,8 @@ flowchart LR
 - [COVESA Open1722](https://github.com/COVESA/Open1722)（IEEE 1722参照実装。フィールド配置の照合と試験に使用）
 - [CoRE-RG/SOA4CoRE](https://github.com/CoRE-RG/SOA4CoRE)（SOME/IP・SOME/IP-SDミドルウェア。INET4へ移植）
 - [Scapy](https://scapy.net/)（SOME/IP・SD実装を試験の参照デコーダとして使用。配布物には含めない）
+- [autosar-e2e](https://github.com/zariiii9003/autosar-e2e)（AUTOSAR E2Eの別実装。試験の参照として使用。配布物には含めない）、[pycryptodome](https://www.pycryptodome.org/)（CMACの別実装。同上）
+- [OpenSSL](https://www.openssl.org/)（libcryptoのCMACをSecOCに使用。動的リンク）
 
 ## 開発・再配布
 

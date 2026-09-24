@@ -12,29 +12,21 @@ index 6f6550a..9df5a07 100644
  
  
 diff --git a/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.cc b/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.cc
-index ca4ca3b..e6fca7e 100644
+index ca4ca3b..5561643 100644
 --- a/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.cc
 +++ b/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.cc
-@@ -29,7 +29,8 @@
- #include "fico4omnet/applications/can/source/CanTrafficSourceAppBase.h"
+@@ -30,6 +30,7 @@
  
  #include "fico4omnet/scheduler/can/CanClock.h"
--#include "fico4omnet/linklayer/can/CanPortInput.h"
-+#include "fico4omnet/linklayer/can/CanPortInput.h"
+ #include "fico4omnet/linklayer/can/CanPortInput.h"
 +#include "fico4omnet/linklayer/can/CanFrameTiming.h"
  
  namespace FiCo4OMNeT {
  
-@@ -75,10 +76,14 @@ void CanTrafficSourceAppBase::checkParameterValues() {
-         throw cRuntimeError(
-                 "The value for the parameter \"bitStuffingPercentage\" is not permitted. Permitted values are from 0 to 1.");
-     }
--    if (canVersion.compare("2.0A") != 0 && canVersion.compare("2.0B") != 0) {
-+    if (canVersion.compare("2.0A") != 0 && canVersion.compare("2.0B") != 0) {
+@@ -79,6 +80,10 @@ void CanTrafficSourceAppBase::checkParameterValues() {
          throw cRuntimeError(
                  "The value for the parameter \"canVersion\" is not permitted. Permitted values are \"2.0B\" and \"2.0A\".");
--    }
-+    }
+     }
 +    if (canVersion.compare("2.0A") == 0 && par("extendedId").boolValue())
 +        throw cRuntimeError("extendedId requires bus version 2.0B.");
 +    if (par("bitRateSwitch").boolValue() && !par("fd").boolValue())
@@ -42,14 +34,10 @@ index ca4ca3b..e6fca7e 100644
  }
  
  void CanTrafficSourceAppBase::handleMessage(cMessage *msg) {
-@@ -128,21 +133,44 @@ void CanTrafficSourceAppBase::initialFrameCreation(const char *type,
+@@ -128,13 +133,37 @@ void CanTrafficSourceAppBase::initialFrameCreation(const char *type,
          if (!initialFrameOffsetTokenizer.hasMoreTokens()) {
              throw cRuntimeError("No more values for the %s frame offset for the next %s frame ID (at index %d). Configuration in the ini file may be incorrect.", type, type, i);
          }
--        CanDataFrame *can_msg = new CanDataFrame(frameType);
--        can_msg->setCanID(checkAndReturnID(static_cast<unsigned int> (frameIDs.at(i))));
--        unsigned int dataFieldLength = static_cast<unsigned int> (atoi(dataLengthFramesTokenizer.nextToken()));
--        can_msg->setBitLength(calculateLength(dataFieldLength));
 +        const unsigned int dataFieldLength = static_cast<unsigned int> (atoi(dataLengthFramesTokenizer.nextToken()));
 +        const bool fd = par("fd").boolValue();
 +        // 2.0B used extended arbitration in the legacy model. Preserve that
@@ -64,11 +52,13 @@ index ca4ca3b..e6fca7e 100644
 +        const unsigned int dlc = fd ? CanFrameTiming::dlcForPayloadLength(dataFieldLength) : dataFieldLength;
 +        if (std::strcmp(type, "remote") == 0 && fd)
 +            throw cRuntimeError("CAN FD remote frames are not supported.");
-+        CanDataFrame *can_msg = new CanDataFrame(frameType);
+         CanDataFrame *can_msg = new CanDataFrame(frameType);
 +        const bool remote = std::strcmp(type, "remote") == 0;
 +        can_msg->setRtr(remote);
 +        can_msg->setExtendedId(extendedId);
-+        can_msg->setCanID(checkAndReturnID(static_cast<unsigned int> (frameIDs.at(i))));
+         can_msg->setCanID(checkAndReturnID(static_cast<unsigned int> (frameIDs.at(i))));
+-        unsigned int dataFieldLength = static_cast<unsigned int> (atoi(dataLengthFramesTokenizer.nextToken()));
+-        can_msg->setBitLength(calculateLength(dataFieldLength));
 +        can_msg->setFd(fd);
 +        can_msg->setBrs(par("bitRateSwitch").boolValue());
 +        can_msg->setPayloadLength(dataFieldLength);
@@ -85,38 +75,63 @@ index ca4ca3b..e6fca7e 100644
          can_msg->encapsulate(payload_packet);
          can_msg->setPeriod(atof(framesPeriodicityTokenizer.nextToken()));
  
-         if (std::strcmp(type, "data") == 0) {
+@@ -142,7 +171,6 @@ void CanTrafficSourceAppBase::initialFrameCreation(const char *type,
              outgoingDataFrames.push_back(can_msg);
              registerDataFrameAtPort(can_msg->getCanID());
--        } else {
+         } else {
 -            can_msg->setRtr(true);
-+        } else {
              registerRemoteFrameAtPort(can_msg->getCanID());
          }
  #pragma GCC diagnostic push
-@@ -209,14 +237,14 @@ unsigned int CanTrafficSourceAppBase::checkAndReturnID(unsigned int canID) {
-     return canID;
+@@ -210,12 +238,12 @@ unsigned int CanTrafficSourceAppBase::checkAndReturnID(unsigned int canID) {
  }
  
--unsigned int CanTrafficSourceAppBase::calculateLength(unsigned int dataLength) {
+ unsigned int CanTrafficSourceAppBase::calculateLength(unsigned int dataLength) {
 -    unsigned int arbFieldLength = 0;
 -    if (canVersion.compare("2.0B") == 0) {
 -        arbFieldLength += ARBITRATIONFIELD29BIT;
 -    }
 -    return (arbFieldLength + DATAFRAMECONTROLBITS
 -            + calculateStuffingBits(dataLength, arbFieldLength));
--}
-+unsigned int CanTrafficSourceAppBase::calculateLength(unsigned int dataLength) {
 +    CanDataFrame frame;
 +    frame.setExtendedId(canVersion.compare("2.0B") == 0);
 +    frame.setPayloadLength(dataLength);
 +    frame.setDlc(dataLength);
 +    frame.setPayloadBytesArraySize(dataLength);
 +    return CanFrameTiming::frameOverheadBits(frame, bitStuffingPercentage);
-+}
+ }
  
  unsigned int CanTrafficSourceAppBase::calculateStuffingBits(unsigned int dataLength,
-         unsigned int arbFieldLength) {
+@@ -259,6 +287,8 @@ void CanTrafficSourceAppBase::frameTransmission(CanDataFrame *df) {
+     cPacket* payload_packet = outgoingFrame->decapsulate();
+     payload_packet->setTimestamp(simTime());
+     outgoingFrame->encapsulate(payload_packet);
++    if (!outgoingFrame->getRtr())
++        prepareTransmission(outgoingFrame);
+     send(outgoingFrame, "out");
+ }
+ 
+diff --git a/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.h b/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.h
+index 6b5553f..7b9310f 100644
+--- a/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.h
++++ b/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.h
+@@ -103,6 +103,16 @@ protected:
+      */
+     virtual void frameTransmission(CanDataFrame *df);
+ 
++    /**
++     * @brief Hook called with each outgoing data frame copy right before it is sent.
++     *
++     * Derived applications may rewrite the payload bytes (e.g. E2E/SecOC protection).
++     * The length and DLC must stay unchanged.
++     *
++     * @param frame the frame that will be sent
++     */
++    virtual void prepareTransmission(CanDataFrame *frame) { (void)frame; }
++
+     /**
+      * @brief Simsignal for received data frames.
+      */
 diff --git a/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.ned b/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.ned
 index 637a412..58800da 100644
 --- a/src/fico4omnet/applications/can/source/CanTrafficSourceAppBase.ned

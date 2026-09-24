@@ -1,17 +1,18 @@
 diff --git a/Makefile.inet4 b/Makefile.inet4
 new file mode 100644
-index 0000000..6fff94f
+index 0000000..814c067
 --- /dev/null
 +++ b/Makefile.inet4
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,9 @@
 +# INET4 port of SOA4CoRE (SOME/IP, SOME/IP-SD, UDP/TCP endpoints); see src-inet4.
 +# The legacy src/ tree (INET 3.x + CoRE4INET) is not built.
 +INET_ROOT ?= $(abspath ../inet)
++AUTOSAR_ROOT ?= $(abspath ../../autosar)
 +.PHONY: all makefiles
 +all: makefiles
 +	$(MAKE) -C src-inet4 MODE=release
 +makefiles:
-+	cd src-inet4 && opp_makemake -f --deep --make-so -o SOA4CoRE_INET4 -O out -I. -I$(INET_ROOT)/src -L$(INET_ROOT)/src -lINET
++	cd src-inet4 && opp_makemake -f --deep --make-so -o SOA4CoRE_INET4 -O out -I. -I$(INET_ROOT)/src -I$(AUTOSAR_ROOT)/src -L$(INET_ROOT)/src -lINET -L$(AUTOSAR_ROOT)/src -lAutosarProtection
 diff --git a/src-inet4/soa4core/applications/base/IService.ned b/src-inet4/soa4core/applications/base/IService.ned
 new file mode 100644
 index 0000000..566d1c1
@@ -1071,10 +1072,10 @@ index 0000000..3500b9f
 +#endif
 diff --git a/src-inet4/soa4core/applications/publisher/base/Publisher.ned b/src-inet4/soa4core/applications/publisher/base/Publisher.ned
 new file mode 100644
-index 0000000..7afcdb7
+index 0000000..c6c6b90
 --- /dev/null
 +++ b/src-inet4/soa4core/applications/publisher/base/Publisher.ned
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,107 @@
 +//
 +// c Timo Haeckel, for HAW Hamburg
 +// 
@@ -1134,6 +1135,35 @@ index 0000000..7afcdb7
 +        int eventId = default(0x8001);     // INET4 port: SOME/IP event ID (method ID with MSB set) of published notifications
 +        int eventgroupId = default(1);     // INET4 port: SOME/IP-SD eventgroup that carries the event
 +        bool preventReservation = default(false); // Prevents the endpoint from reserving resources for the stream
++        // INET4 port: AUTOSAR E2E and SecOC (autosar/protection/package.ned). The E2E area
++        // starts at the SOME/IP Request ID; e2eOffset 8 places the E2E header in front of
++        // the event data. Default DataIDs: E2E P04/P07 service ID << 16 | event ID, other
++        // profiles the event ID; SecOC the event ID.
++        string e2eProfile @enum("none", "P01", "P02", "P04", "P05", "P07") = default("none");
++        int e2eDataId = default(-1);
++        string e2eDataIdMode @enum("both", "alt", "low", "nibble") = default("both");
++        string e2eDataIdList = default("");
++        int e2eOffset = default(8);
++        int e2eMaxDeltaCounter = default(1);
++        int e2eSmWindowSize = default(3);
++        int e2eSmMinOkStateInit = default(1);
++        int e2eSmMaxErrorStateInit = default(1);
++        int e2eSmMinOkStateValid = default(1);
++        int e2eSmMaxErrorStateValid = default(1);
++        int e2eSmMinOkStateInvalid = default(2);
++        int e2eSmMaxErrorStateInvalid = default(0);
++        bool secocEnabled = default(false);
++        int secocDataId = default(-1);
++        string secocKey = default("000102030405060708090a0b0c0d0e0f");
++        int secocFreshnessBits = default(64);
++        int secocFreshnessTxBits = default(8);
++        int secocMacTxBits = default(24);
++        int secocAcceptanceWindow = default(0);
++        // Fault injection per publisher endpoint after protection (1-based message indices).
++        string faultCorruptAt = default("");
++        string faultReplayAt = default("");
++        string faultSkipAt = default("");
++        int faultSkipCount = default(3);
 +    
 +        //Offered instance id, must not be 0 or 0xFFFF, default is 1
 +        instanceID = default(0x0001);
@@ -1410,10 +1440,10 @@ index 0000000..808177c
 +#endif
 diff --git a/src-inet4/soa4core/applications/subscriber/base/Subscriber.ned b/src-inet4/soa4core/applications/subscriber/base/Subscriber.ned
 new file mode 100644
-index 0000000..b0b6bbb
+index 0000000..0a9dbcc
 --- /dev/null
 +++ b/src-inet4/soa4core/applications/subscriber/base/Subscriber.ned
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,81 @@
 +//
 +// c Timo Haeckel for HAW Hamburg
 +// 
@@ -1470,6 +1500,30 @@ index 0000000..b0b6bbb
 +        // Multicast destination port for UDP mcast
 +        int eventgroupId = default(1); // INET4 port: SOME/IP-SD eventgroup to subscribe
 +        int mcastDestPort = default(-1); // Requires a valid UDP port, if -1 no udp mcast is supported by publisher 
++        // INET4 port: AUTOSAR E2E and SecOC (autosar/protection/package.ned). The E2E area
++        // starts at the SOME/IP Request ID; e2eOffset 8 places the E2E header in front of
++        // the event data. Default DataIDs: E2E P04/P07 service ID << 16 | event ID, other
++        // profiles the event ID; SecOC the event ID.
++        string e2eProfile @enum("none", "P01", "P02", "P04", "P05", "P07") = default("none");
++        int e2eDataId = default(-1);
++        string e2eDataIdMode @enum("both", "alt", "low", "nibble") = default("both");
++        string e2eDataIdList = default("");
++        int e2eOffset = default(8);
++        int e2eMaxDeltaCounter = default(1);
++        int e2eSmWindowSize = default(3);
++        int e2eSmMinOkStateInit = default(1);
++        int e2eSmMaxErrorStateInit = default(1);
++        int e2eSmMinOkStateValid = default(1);
++        int e2eSmMaxErrorStateValid = default(1);
++        int e2eSmMinOkStateInvalid = default(2);
++        int e2eSmMaxErrorStateInvalid = default(0);
++        bool secocEnabled = default(false);
++        int secocDataId = default(-1);
++        string secocKey = default("000102030405060708090a0b0c0d0e0f");
++        int secocFreshnessBits = default(64);
++        int secocFreshnessTxBits = default(8);
++        int secocMacTxBits = default(24);
++        int secocAcceptanceWindow = default(0);
 +}
 diff --git a/src-inet4/soa4core/connector/base/ConnectorBase.cc b/src-inet4/soa4core/connector/base/ConnectorBase.cc
 new file mode 100644
@@ -5804,10 +5858,10 @@ index 0000000..52f61fd
 +}
 diff --git a/src-inet4/soa4core/endpoints/publisher/someip/base/SOMEIPPublisherEndpointBase.cc b/src-inet4/soa4core/endpoints/publisher/someip/base/SOMEIPPublisherEndpointBase.cc
 new file mode 100644
-index 0000000..ed27b77
+index 0000000..2e67ef9
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/publisher/someip/base/SOMEIPPublisherEndpointBase.cc
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,54 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -5838,6 +5892,15 @@ index 0000000..ed27b77
 +    Publisher* publisher = dynamic_cast<Publisher*>(application);
 +    if (!publisher)
 +        throw omnetpp::cRuntimeError("SOME/IP publisher endpoint requires a Publisher application");
++    _protector.configure(publisher, publisher->getServiceId(), publisher->getEventId());
++    if (_protector.replayNext()) {
++        // Fault injection: the previous message (header and payload) is sent again.
++        auto header = makeShared<SomeIpHeader>(_protector.replay(packet));
++        finalizeSomeIpHeader(*header, B(packet->getDataLength()).get());
++        packet->insertAtFront(header);
++        packet->setName(getMessageName(publisher->getServiceId()).c_str());
++        return;
++    }
 +    _sessionId = _sessionId == 0xFFFF ? 1 : _sessionId + 1;
 +    auto header = makeShared<SomeIpHeader>();
 +    header->setServiceId(publisher->getServiceId());
@@ -5846,6 +5909,7 @@ index 0000000..ed27b77
 +    header->setSessionId(_sessionId);
 +    header->setMessageType(NOTIFICATION);
 +    header->setReturnCode(E_OK);
++    _protector.protect(packet, *header);
 +    finalizeSomeIpHeader(*header, B(packet->getDataLength()).get());
 +    packet->insertAtFront(header);
 +    packet->setName(getMessageName(publisher->getServiceId()).c_str());
@@ -5854,10 +5918,10 @@ index 0000000..ed27b77
 +} /*end namespace SOA4CoRE*/
 diff --git a/src-inet4/soa4core/endpoints/publisher/someip/base/SOMEIPPublisherEndpointBase.h b/src-inet4/soa4core/endpoints/publisher/someip/base/SOMEIPPublisherEndpointBase.h
 new file mode 100644
-index 0000000..735a864
+index 0000000..6928713
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/publisher/someip/base/SOMEIPPublisherEndpointBase.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,51 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -5882,6 +5946,7 @@ index 0000000..735a864
 +
 +#include "inet/common/packet/Packet.h"
 +#include "soa4core/messages/someip/SomeIp_m.h"
++#include "soa4core/protection/SomeIpProtection.h"
 +
 +namespace SOA4CoRE {
 +
@@ -5889,17 +5954,20 @@ index 0000000..735a864
 +
 +// INET4 port: events are sent as SOME/IP NOTIFICATION messages (PRS_SOMEIP_00925):
 +// message ID = service ID | event ID (MSB set), client ID 0x0000, session ID
-+// counting 1..0xFFFF and wrapping to 1 (session handling active).
++// counting 1..0xFFFF and wrapping to 1 (session handling active). The Publisher's
++// e2e*/secoc* parameters enable AUTOSAR E2E and SecOC (see SomeIpProtection.h).
 +class SOMEIPPublisherEndpointBase
 +{
 +protected:
 +    void prependSomeIpHeader(inet::Packet* packet, ServiceBase* application);
++    void recordProtectionStatistics(omnetpp::cComponent* owner) const { _protector.record(owner); }
 +    std::string getMessageName(int serviceId) const {
 +        return "SOME/IP Service " + std::to_string(serviceId);
 +    }
 +
 +private:
 +    uint16_t _sessionId = 0;
++    SomeIpProtector _protector;
 +};
 +
 +} /*end namespace SOA4CoRE*/
@@ -5907,10 +5975,10 @@ index 0000000..735a864
 +#endif
 diff --git a/src-inet4/soa4core/endpoints/publisher/someip/tcp/SOMEIPTCPPublisherEndpoint.cc b/src-inet4/soa4core/endpoints/publisher/someip/tcp/SOMEIPTCPPublisherEndpoint.cc
 new file mode 100644
-index 0000000..18dbdff
+index 0000000..3e243f0
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/publisher/someip/tcp/SOMEIPTCPPublisherEndpoint.cc
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,58 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -5963,13 +6031,18 @@ index 0000000..18dbdff
 +    return buildStreamIDForService(app->getServiceId(), app->getInstanceId(), destAddress);
 +}
 +
++void SOMEIPTCPPublisherEndpoint::finish() {
++    TCPPublisherEndpoint::finish();
++    recordProtectionStatistics(this);
++}
++
 +} /*end namespace SOA4CoRE*/
 diff --git a/src-inet4/soa4core/endpoints/publisher/someip/tcp/SOMEIPTCPPublisherEndpoint.h b/src-inet4/soa4core/endpoints/publisher/someip/tcp/SOMEIPTCPPublisherEndpoint.h
 new file mode 100644
-index 0000000..8ff222f
+index 0000000..40a5ae0
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/publisher/someip/tcp/SOMEIPTCPPublisherEndpoint.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,40 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -6001,6 +6074,7 @@ index 0000000..8ff222f
 +    virtual ConnectionSpecificInformation* getConnectionSpecificInformation() override;
 +
 +protected:
++    virtual void finish() override;
 +    virtual inet::Packet* createTransportPacket(cPacket* msg) override;
 +    virtual size_t getHeaderBytes() override;
 +    virtual uint64_t createStreamId(inet::Ipv4Address destAddress) override;
@@ -6050,10 +6124,10 @@ index 0000000..56319f1
 +}
 diff --git a/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPMcastPublisherEndpoint.cc b/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPMcastPublisherEndpoint.cc
 new file mode 100644
-index 0000000..ba82a0d
+index 0000000..efcd2e7
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPMcastPublisherEndpoint.cc
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,60 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -6108,13 +6182,18 @@ index 0000000..ba82a0d
 +    return buildStreamIDForService(app->getServiceId(), app->getInstanceId(), destAddress);
 +}
 +
++void SOMEIPUDPMcastPublisherEndpoint::finish() {
++    UDPMcastPublisherEndpoint::finish();
++    recordProtectionStatistics(this);
++}
++
 +} /*end namespace SOA4CoRE*/
 diff --git a/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPMcastPublisherEndpoint.h b/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPMcastPublisherEndpoint.h
 new file mode 100644
-index 0000000..ca6fa6f
+index 0000000..005775f
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPMcastPublisherEndpoint.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,40 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -6146,6 +6225,7 @@ index 0000000..ca6fa6f
 +    virtual ConnectionSpecificInformation* getConnectionSpecificInformation() override;
 +
 +protected:
++    virtual void finish() override;
 +    virtual inet::Packet* createTransportPacket(cPacket* msg) override;
 +    virtual size_t getHeaderBytes() override;
 +    virtual uint64_t createStreamId(inet::Ipv4Address destAddress) override;
@@ -6197,10 +6277,10 @@ index 0000000..ea9a257
 +}
 diff --git a/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPPublisherEndpoint.cc b/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPPublisherEndpoint.cc
 new file mode 100644
-index 0000000..183c280
+index 0000000..538125c
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPPublisherEndpoint.cc
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,58 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -6253,13 +6333,18 @@ index 0000000..183c280
 +    return buildStreamIDForService(app->getServiceId(), app->getInstanceId(), destAddress);
 +}
 +
++void SOMEIPUDPPublisherEndpoint::finish() {
++    UDPPublisherEndpoint::finish();
++    recordProtectionStatistics(this);
++}
++
 +} /*end namespace SOA4CoRE*/
 diff --git a/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPPublisherEndpoint.h b/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPPublisherEndpoint.h
 new file mode 100644
-index 0000000..4def713
+index 0000000..7478ef9
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/publisher/someip/udp/SOMEIPUDPPublisherEndpoint.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,40 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -6291,6 +6376,7 @@ index 0000000..4def713
 +    virtual ConnectionSpecificInformation* getConnectionSpecificInformation() override;
 +
 +protected:
++    virtual void finish() override;
 +    virtual inet::Packet* createTransportPacket(cPacket* msg) override;
 +    virtual size_t getHeaderBytes() override;
 +    virtual uint64_t createStreamId(inet::Ipv4Address destAddress) override;
@@ -7269,10 +7355,10 @@ index 0000000..f64a46f
 +}
 diff --git a/src-inet4/soa4core/endpoints/subscriber/someip/base/SOMEIPSubscriberEndpointBase.cc b/src-inet4/soa4core/endpoints/subscriber/someip/base/SOMEIPSubscriberEndpointBase.cc
 new file mode 100644
-index 0000000..8ba7d50
+index 0000000..912c01f
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/subscriber/someip/base/SOMEIPSubscriberEndpointBase.cc
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,71 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -7291,6 +7377,7 @@ index 0000000..8ba7d50
 +//
 +
 +#include "soa4core/endpoints/subscriber/someip/base/SOMEIPSubscriberEndpointBase.h"
++#include "soa4core/applications/base/ServiceBase.h"
 +
 +using namespace inet;
 +
@@ -7306,8 +7393,9 @@ index 0000000..8ba7d50
 +            && (expectedServiceId < 0 || header.getServiceId() == expectedServiceId);
 +}
 +
-+bool SOMEIPSubscriberEndpointBase::acceptSomeIpMessage(Packet* packet, int expectedServiceId)
++bool SOMEIPSubscriberEndpointBase::acceptSomeIpMessage(Packet* packet, ServiceBase* application)
 +{
++    const int expectedServiceId = application ? application->getServiceId() : -1;
 +    if (packet->getDataLength() < B(SOMEIP_HEADER_BYTES)) {
 +        ++_someIpInvalid;
 +        return false;
@@ -7328,7 +7416,9 @@ index 0000000..8ba7d50
 +        }
 +        _nextSession[key] = header->getSessionId() == 0xFFFF ? 1 : header->getSessionId() + 1;
 +    }
-+    return true;
++    if (application)
++        _verifier.configure(application, header->getServiceId(), header->getMethodId());
++    return _verifier.accept(packet, *header);
 +}
 +
 +void SOMEIPSubscriberEndpointBase::recordSomeIpStatistics(omnetpp::cComponent* owner) const
@@ -7336,15 +7426,16 @@ index 0000000..8ba7d50
 +    owner->recordScalar("someipReceived", _someIpReceived);
 +    owner->recordScalar("someipInvalid", _someIpInvalid);
 +    owner->recordScalar("someipSessionGaps", _someIpSessionGaps);
++    _verifier.record(owner);
 +}
 +
 +} /*end namespace SOA4CoRE*/
 diff --git a/src-inet4/soa4core/endpoints/subscriber/someip/base/SOMEIPSubscriberEndpointBase.h b/src-inet4/soa4core/endpoints/subscriber/someip/base/SOMEIPSubscriberEndpointBase.h
 new file mode 100644
-index 0000000..26b26da
+index 0000000..8a1008e
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/subscriber/someip/base/SOMEIPSubscriberEndpointBase.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,53 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -7369,17 +7460,21 @@ index 0000000..26b26da
 +
 +#include "inet/common/packet/Packet.h"
 +#include "soa4core/messages/someip/SomeIp_m.h"
++#include "soa4core/protection/SomeIpProtection.h"
 +
 +namespace SOA4CoRE {
 +
 +// INET4 port: validation of received SOME/IP notifications. The header is removed;
 +// invalid messages (version, type, length, service, non-event method ID) are counted
 +// and dropped. Session IDs are tracked per event to count missing notifications.
++// With the Subscriber's e2e*/secoc* parameters set, SecOC and E2E are verified next;
++// only messages with SecOC OK and E2E status OK/OKSOMELOST are delivered.
++class ServiceBase;
 +class SOMEIPSubscriberEndpointBase
 +{
 +protected:
-+    // Returns true when packet (header removed) should be delivered.
-+    bool acceptSomeIpMessage(inet::Packet* packet, int expectedServiceId);
++    // Returns true when packet (header removed) should be delivered to 'application'.
++    bool acceptSomeIpMessage(inet::Packet* packet, ServiceBase* application);
 +    void recordSomeIpStatistics(omnetpp::cComponent* owner) const;
 +    bool isValidHeader(const SomeIpHeader& header, inet::b dataAfterHeader, int expectedServiceId) const;
 +
@@ -7388,6 +7483,7 @@ index 0000000..26b26da
 +    long _someIpInvalid = 0;
 +    long _someIpSessionGaps = 0;
 +    std::map<uint32_t, uint16_t> _nextSession;
++    SomeIpVerifier _verifier;
 +};
 +
 +} /*end namespace SOA4CoRE*/
@@ -7395,7 +7491,7 @@ index 0000000..26b26da
 +#endif
 diff --git a/src-inet4/soa4core/endpoints/subscriber/someip/tcp/SOMEIPTCPSubscriberEndpoint.cc b/src-inet4/soa4core/endpoints/subscriber/someip/tcp/SOMEIPTCPSubscriberEndpoint.cc
 new file mode 100644
-index 0000000..817eae3
+index 0000000..cca8b8a
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/subscriber/someip/tcp/SOMEIPTCPSubscriberEndpoint.cc
 @@ -0,0 +1,67 @@
@@ -7433,10 +7529,10 @@ index 0000000..817eae3
 +    return connection;
 +}
 +
-+int SOMEIPTCPSubscriberEndpoint::expectedServiceId() const {
++ServiceBase* SOMEIPTCPSubscriberEndpoint::subscriberApplication() const {
 +    if (_subscriberConnector && !_subscriberConnector->getApplications().empty())
-+        return _subscriberConnector->getApplications()[0]->getServiceId();
-+    return -1;
++        return _subscriberConnector->getApplications()[0];
++    return nullptr;
 +}
 +
 +// SOME/IP over TCP: messages may span or share TCP segments; reassemble by the length field.
@@ -7454,7 +7550,7 @@ index 0000000..817eae3
 +        if (_streamQueue.getLength() < messageLength)
 +            return;
 +        Packet* message = new Packet("SOME/IP", _streamQueue.pop(messageLength));
-+        if (acceptSomeIpMessage(message, expectedServiceId()))
++        if (acceptSomeIpMessage(message, subscriberApplication()))
 +            deliverToConnector(message);
 +        else
 +            delete message;
@@ -7468,7 +7564,7 @@ index 0000000..817eae3
 +} /*end namespace SOA4CoRE*/
 diff --git a/src-inet4/soa4core/endpoints/subscriber/someip/tcp/SOMEIPTCPSubscriberEndpoint.h b/src-inet4/soa4core/endpoints/subscriber/someip/tcp/SOMEIPTCPSubscriberEndpoint.h
 new file mode 100644
-index 0000000..a9a169c
+index 0000000..0d8afd4
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/subscriber/someip/tcp/SOMEIPTCPSubscriberEndpoint.h
 @@ -0,0 +1,43 @@
@@ -7506,7 +7602,7 @@ index 0000000..a9a169c
 +protected:
 +    virtual void handleStreamData(inet::Packet *packet) override;
 +    virtual void finish() override;
-+    int expectedServiceId() const;
++    ServiceBase* subscriberApplication() const;
 +
 +protected:
 +    inet::ChunkQueue _streamQueue;
@@ -7557,7 +7653,7 @@ index 0000000..4136a07
 +}
 diff --git a/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPMcastSubscriberEndpoint.cc b/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPMcastSubscriberEndpoint.cc
 new file mode 100644
-index 0000000..aa8b4c8
+index 0000000..dbd25be
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPMcastSubscriberEndpoint.cc
 @@ -0,0 +1,54 @@
@@ -7597,14 +7693,14 @@ index 0000000..aa8b4c8
 +    return connection;
 +}
 +
-+int SOMEIPUDPMcastSubscriberEndpoint::expectedServiceId() const {
++ServiceBase* SOMEIPUDPMcastSubscriberEndpoint::subscriberApplication() const {
 +    if (_subscriberConnector && !_subscriberConnector->getApplications().empty())
-+        return _subscriberConnector->getApplications()[0]->getServiceId();
-+    return -1;
++        return _subscriberConnector->getApplications()[0];
++    return nullptr;
 +}
 +
 +void SOMEIPUDPMcastSubscriberEndpoint::handleDatagram(Packet *packet) {
-+    if (acceptSomeIpMessage(packet, expectedServiceId()))
++    if (acceptSomeIpMessage(packet, subscriberApplication()))
 +        deliverToConnector(packet);
 +    else
 +        delete packet;
@@ -7617,7 +7713,7 @@ index 0000000..aa8b4c8
 +} /*end namespace SOA4CoRE*/
 diff --git a/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPMcastSubscriberEndpoint.h b/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPMcastSubscriberEndpoint.h
 new file mode 100644
-index 0000000..49a5307
+index 0000000..907472b
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPMcastSubscriberEndpoint.h
 @@ -0,0 +1,39 @@
@@ -7654,7 +7750,7 @@ index 0000000..49a5307
 +protected:
 +    virtual void handleDatagram(inet::Packet *packet) override;
 +    virtual void finish() override;
-+    int expectedServiceId() const;
++    ServiceBase* subscriberApplication() const;
 +};
 +
 +} /*end namespace SOA4CoRE*/
@@ -7704,7 +7800,7 @@ index 0000000..530b0fb
 +}
 diff --git a/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPSubscriberEndpoint.cc b/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPSubscriberEndpoint.cc
 new file mode 100644
-index 0000000..57bccc4
+index 0000000..5f8adb6
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPSubscriberEndpoint.cc
 @@ -0,0 +1,52 @@
@@ -7742,14 +7838,14 @@ index 0000000..57bccc4
 +    return connection;
 +}
 +
-+int SOMEIPUDPSubscriberEndpoint::expectedServiceId() const {
++ServiceBase* SOMEIPUDPSubscriberEndpoint::subscriberApplication() const {
 +    if (_subscriberConnector && !_subscriberConnector->getApplications().empty())
-+        return _subscriberConnector->getApplications()[0]->getServiceId();
-+    return -1;
++        return _subscriberConnector->getApplications()[0];
++    return nullptr;
 +}
 +
 +void SOMEIPUDPSubscriberEndpoint::handleDatagram(Packet *packet) {
-+    if (acceptSomeIpMessage(packet, expectedServiceId()))
++    if (acceptSomeIpMessage(packet, subscriberApplication()))
 +        deliverToConnector(packet);
 +    else
 +        delete packet;
@@ -7762,7 +7858,7 @@ index 0000000..57bccc4
 +} /*end namespace SOA4CoRE*/
 diff --git a/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPSubscriberEndpoint.h b/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPSubscriberEndpoint.h
 new file mode 100644
-index 0000000..9212621
+index 0000000..1acb894
 --- /dev/null
 +++ b/src-inet4/soa4core/endpoints/subscriber/someip/udp/SOMEIPUDPSubscriberEndpoint.h
 @@ -0,0 +1,39 @@
@@ -7799,7 +7895,7 @@ index 0000000..9212621
 +protected:
 +    virtual void handleDatagram(inet::Packet *packet) override;
 +    virtual void finish() override;
-+    int expectedServiceId() const;
++    ServiceBase* subscriberApplication() const;
 +};
 +
 +} /*end namespace SOA4CoRE*/
@@ -10894,6 +10990,329 @@ index 0000000..bb9778b
 +package soa4core;
 +
 +@license(LGPL);
+diff --git a/src-inet4/soa4core/protection/SomeIpProtection.cc b/src-inet4/soa4core/protection/SomeIpProtection.cc
+new file mode 100644
+index 0000000..96f3eee
+--- /dev/null
++++ b/src-inet4/soa4core/protection/SomeIpProtection.cc
+@@ -0,0 +1,221 @@
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU Lesser General Public License for more details.
++//
++// You should have received a copy of the GNU Lesser General Public License
++// along with this program.  If not, see http://www.gnu.org/licenses/.
++//
++
++#include "soa4core/protection/SomeIpProtection.h"
++
++#include <algorithm>
++
++#include "inet/common/TimeTag_m.h"
++#include "inet/common/packet/chunk/BytesChunk.h"
++
++using namespace inet;
++using namespace autosar;
++
++namespace SOA4CoRE {
++namespace {
++
++// Serialized SOME/IP header bytes 8..15 (Request ID .. Return Code).
++Bytes upperHeader(const SomeIpHeader& h)
++{
++    return {uint8_t(h.getClientId() >> 8), uint8_t(h.getClientId()), uint8_t(h.getSessionId() >> 8),
++            uint8_t(h.getSessionId()), h.getProtocolVersion(), h.getInterfaceVersion(), h.getMessageType(),
++            h.getReturnCode()};
++}
++
++Bytes messageId(const SomeIpHeader& h)
++{
++    return {uint8_t(h.getServiceId() >> 8), uint8_t(h.getServiceId()), uint8_t(h.getMethodId() >> 8),
++            uint8_t(h.getMethodId())};
++}
++
++simtime_t creationTimeOf(const Packet* packet)
++{
++    simtime_t creation = simTime();
++    if (packet->getDataLength() > b(0))
++        for (const auto& region : packet->peekData()->getAllTags<CreationTimeTag>())
++            creation = std::min(creation, region.getTag()->getCreationTime());
++    return creation;
++}
++
++void replacePayload(Packet* packet, const Bytes& bytes, simtime_t creation)
++{
++    packet->eraseData();
++    if (bytes.empty())
++        return;
++    auto chunk = makeShared<BytesChunk>(bytes);
++    chunk->addTag<CreationTimeTag>()->setCreationTime(creation);
++    packet->insertAtBack(chunk);
++}
++
++} // namespace
++
++ProtectionConfig readSomeIpProtection(cComponent *application, uint16_t serviceId, uint16_t eventId)
++{
++    // Default DataIDs: service ID | event ID for the 32 bit profiles, else the event ID.
++    const E2EProfile profile = parseE2EProfile(application->par("e2eProfile").stdstringValue());
++    const bool wide = profile == E2EProfile::P04 || profile == E2EProfile::P07;
++    ProtectionConfig config = readProtectionConfig(application, wide ? (uint32_t(serviceId) << 16) | eventId : eventId, eventId);
++    if (config.e2e.profile != E2EProfile::None && config.e2e.offset < SOMEIP_E2E_UPPER_HEADER_BYTES)
++        throw cRuntimeError(application, "SOME/IP e2eOffset must be at least 8 (the E2E header follows the SOME/IP header)");
++    return config;
++}
++
++void SomeIpProtector::configure(cComponent *application, uint16_t serviceId, uint16_t eventId)
++{
++    if (_configured)
++        return;
++    _configured = true;
++    _config = readSomeIpProtection(application, serviceId, eventId);
++    _enabled = _config.e2e.profile != E2EProfile::None || _config.secocEnabled;
++    _e2e = std::make_unique<E2EProtector>(_config.e2e);
++    if (_config.secocEnabled)
++        _secoc = std::make_unique<SecOcSender>(_config.secoc);
++    _corruptAt = parseIndexList(application->par("faultCorruptAt").stringValue());
++    _replayAt = parseIndexList(application->par("faultReplayAt").stringValue());
++    _skipAt = parseIndexList(application->par("faultSkipAt").stringValue());
++    _skipCount = application->par("faultSkipCount").intValue();
++}
++
++bool SomeIpProtector::replayNext()
++{
++    return _enabled && !_lastPayload.empty() && _replayAt.count(_sent + 1);
++}
++
++const SomeIpHeader& SomeIpProtector::replay(Packet* packet)
++{
++    ++_sent;
++    ++_replayed;
++    replacePayload(packet, _lastPayload, creationTimeOf(packet));
++    return _lastHeader;
++}
++
++void SomeIpProtector::protect(Packet* packet, const SomeIpHeader& header)
++{
++    if (!_enabled)
++        return;
++    ++_sent;
++    if (_skipAt.count(_sent)) {
++        _e2e->skip(_skipCount);
++        if (_secoc)
++            _secoc->skip(_skipCount);
++    }
++    const simtime_t creation = creationTimeOf(packet);
++    const size_t dataBytes = B(packet->getDataLength()).get();
++    const size_t e2eBytes = e2eHeaderBytes(_config.e2e.profile);
++    const size_t position = _config.e2e.profile == E2EProfile::None ? 0 : _config.e2e.offset - SOMEIP_E2E_UPPER_HEADER_BYTES;
++    if (position > dataBytes)
++        throw cRuntimeError("SOME/IP e2eOffset %zu lies behind the %zu byte payload", _config.e2e.offset, dataBytes);
++    Bytes area = upperHeader(header);
++    for (size_t i = 0; i < dataBytes; ++i) {
++        if (i == position)
++            area.insert(area.end(), e2eBytes, 0);
++        area.push_back(uint8_t(header.getSessionId() + i));
++    }
++    if (position == dataBytes)
++        area.insert(area.end(), e2eBytes, 0);
++    _e2e->protect(area.data(), area.size());
++    Bytes payload(area.begin() + SOMEIP_E2E_UPPER_HEADER_BYTES, area.end());
++    if (_secoc) {
++        Bytes authentic = messageId(header);
++        authentic.insert(authentic.end(), area.begin(), area.end());
++        const Bytes secured = _secoc->secure(authentic.data(), authentic.size());
++        payload.insert(payload.end(), secured.begin() + authentic.size(), secured.end());
++    }
++    _lastPayload = payload;
++    _lastHeader = header;
++    if (_corruptAt.count(_sent)) {
++        payload[payload.size() / 2] ^= 0x10;   // one bit error after protection
++        ++_corrupted;
++    }
++    replacePayload(packet, payload, creation);
++}
++
++void SomeIpProtector::record(cComponent *owner) const
++{
++    if (!_enabled)
++        return;
++    owner->recordScalar("protectedMessages", _sent);
++    owner->recordScalar("faultCorrupted", _corrupted);
++    owner->recordScalar("faultReplayed", _replayed);
++}
++
++void SomeIpVerifier::configure(cComponent *application, uint16_t serviceId, uint16_t eventId)
++{
++    if (_configured)
++        return;
++    _configured = true;
++    _config = readSomeIpProtection(application, serviceId, eventId);
++    _enabled = _config.e2e.profile != E2EProfile::None || _config.secocEnabled;
++    _e2e = std::make_unique<E2EChecker>(_config.e2e);
++    _sm = std::make_unique<E2EStateMachine>(_config.sm);
++    if (_config.secocEnabled)
++        _secoc = std::make_unique<SecOcReceiver>(_config.secoc);
++}
++
++bool SomeIpVerifier::accept(Packet* packet, const SomeIpHeader& header)
++{
++    if (!_enabled)
++        return true;
++    const simtime_t creation = creationTimeOf(packet);
++    const Bytes wire = packet->getDataLength() > b(0) ? packet->peekDataAsBytes()->getBytes() : Bytes();
++    Bytes area = upperHeader(header);
++    if (_secoc) {
++        Bytes secured = messageId(header);
++        secured.insert(secured.end(), area.begin(), area.end());
++        secured.insert(secured.end(), wire.begin(), wire.end());
++        Bytes authentic;
++        const SecOcVerifyResult result = _secoc->verify(secured.data(), secured.size(), authentic);
++        _stats.count(result);
++        if (result != SecOcVerifyResult::Ok)
++            return false;
++        area.assign(authentic.begin() + 4, authentic.end());
++    }
++    else
++        area.insert(area.end(), wire.begin(), wire.end());
++    E2ECheckStatus status = E2ECheckStatus::Ok;
++    if (_config.e2e.profile != E2EProfile::None) {
++        status = _e2e->check(area.data(), area.size());
++        _stats.count(status);
++        const E2ESmState state = _sm->check(status);
++        (state == E2ESmState::Valid ? _stats.smValid : _stats.smInvalid)++;
++    }
++    if (status != E2ECheckStatus::Ok && status != E2ECheckStatus::OkSomeLost)
++        return false;
++    // Application data: the E2E area without the upper header and the E2E header.
++    const size_t first = _config.e2e.profile == E2EProfile::None ? SOMEIP_E2E_UPPER_HEADER_BYTES : _config.e2e.offset;
++    const size_t last = first + e2eHeaderBytes(_config.e2e.profile);
++    Bytes data(area.begin() + SOMEIP_E2E_UPPER_HEADER_BYTES, area.begin() + first);
++    data.insert(data.end(), area.begin() + last, area.end());
++    for (size_t i = 0; i < data.size(); ++i)
++        if (data[i] != uint8_t(header.getSessionId() + i)) {
++            ++_patternErrors;
++            break;
++        }
++    ++_delivered;
++    replacePayload(packet, data, creation);
++    return true;
++}
++
++void SomeIpVerifier::record(cComponent *owner) const
++{
++    if (!_enabled)
++        return;
++    _stats.record(owner, "");
++    owner->recordScalar("protectionDelivered", _delivered);
++    owner->recordScalar("patternErrors", _patternErrors);
++    owner->recordScalar("e2eSmFinalState", int(_sm->state()));
++}
++
++} /*end namespace SOA4CoRE*/
+diff --git a/src-inet4/soa4core/protection/SomeIpProtection.h b/src-inet4/soa4core/protection/SomeIpProtection.h
+new file mode 100644
+index 0000000..6c34f9f
+--- /dev/null
++++ b/src-inet4/soa4core/protection/SomeIpProtection.h
+@@ -0,0 +1,90 @@
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU Lesser General Public License for more details.
++//
++// You should have received a copy of the GNU Lesser General Public License
++// along with this program.  If not, see http://www.gnu.org/licenses/.
++//
++
++#ifndef __SOA4CORE_SOMEIPPROTECTION_H_
++#define __SOA4CORE_SOMEIPPROTECTION_H_
++
++#include <memory>
++
++#include "autosar/protection/ProtectionParams.h"
++#include "inet/common/packet/Packet.h"
++#include "soa4core/messages/someip/SomeIp_m.h"
++
++namespace SOA4CoRE {
++
++// INET4 port: AUTOSAR E2E and SecOC for SOME/IP event notifications (not for SD).
++//
++//   E2E area  = SOME/IP header from Request ID to Return Code (8 bytes) | payload,
++//               E2E header at e2eOffset of this area (default 8 = start of payload),
++//               as done by the E2E transformer on top of the SOME/IP transformer.
++//   Authentic I-PDU = Message ID (4 bytes) | E2E area   (the Length field is excluded
++//               because it changes with the SecOC trailer)
++//   Wire payload = E2E protected payload | SecOC FV | SecOC MAC
++//
++// Application data bytes carry the pattern (session ID + index) & 0xFF.
++constexpr size_t SOMEIP_E2E_UPPER_HEADER_BYTES = 8;
++
++autosar::ProtectionConfig readSomeIpProtection(omnetpp::cComponent *application, uint16_t serviceId, uint16_t eventId);
++
++// Publisher endpoint side, one instance per endpoint (one counter/FV sequence).
++class SomeIpProtector
++{
++public:
++    // Reads the Publisher's parameters on first use.
++    void configure(omnetpp::cComponent *application, uint16_t serviceId, uint16_t eventId);
++    bool isEnabled() const { return _enabled; }
++    // Fault injection: true when the next message is a replay of the previous one.
++    bool replayNext();
++    // Replaces packet's payload by the previous protected payload; returns its header.
++    const SomeIpHeader& replay(inet::Packet* packet);
++    // Replaces the payload by the protected payload for 'header' (length not yet final).
++    void protect(inet::Packet* packet, const SomeIpHeader& header);
++    void record(omnetpp::cComponent *owner) const;
++
++private:
++    bool _configured = false, _enabled = false;
++    autosar::ProtectionConfig _config;
++    std::unique_ptr<autosar::E2EProtector> _e2e;
++    std::unique_ptr<autosar::SecOcSender> _secoc;
++    std::set<long> _corruptAt, _replayAt, _skipAt;
++    long _skipCount = 0, _sent = 0, _corrupted = 0, _replayed = 0;
++    autosar::Bytes _lastPayload;
++    SomeIpHeader _lastHeader;
++};
++
++// Subscriber endpoint side: SecOC verification, then E2E check and state machine.
++class SomeIpVerifier
++{
++public:
++    void configure(omnetpp::cComponent *application, uint16_t serviceId, uint16_t eventId);
++    bool isEnabled() const { return _enabled; }
++    // 'packet' holds the payload after the SOME/IP header. On true, it holds the
++    // application data only (E2E header and SecOC trailer removed).
++    bool accept(inet::Packet* packet, const SomeIpHeader& header);
++    void record(omnetpp::cComponent *owner) const;
++
++private:
++    bool _configured = false, _enabled = false;
++    autosar::ProtectionConfig _config;
++    std::unique_ptr<autosar::E2EChecker> _e2e;
++    std::unique_ptr<autosar::E2EStateMachine> _sm;
++    std::unique_ptr<autosar::SecOcReceiver> _secoc;
++    autosar::ProtectionStatistics _stats;
++    long _delivered = 0, _patternErrors = 0;
++};
++
++} /*end namespace SOA4CoRE*/
++
++#endif
 diff --git a/src-inet4/soa4core/qosmanagement/negotiation/datatypes/EndpointDescription.h b/src-inet4/soa4core/qosmanagement/negotiation/datatypes/EndpointDescription.h
 new file mode 100644
 index 0000000..f2f52ff

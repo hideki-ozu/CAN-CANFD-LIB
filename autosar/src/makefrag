@@ -1,0 +1,5 @@
+# OpenSSL libcrypto (AES-128-CMAC for SecOC). scripts/env.sh sets OPENSSL_CFLAGS and
+# OPENSSL_LIBS; the defaults use the system development package.
+OPENSSL_LIBS ?= -lcrypto
+INCLUDE_PATH += $(OPENSSL_CFLAGS)
+LIBS += $(OPENSSL_LIBS)

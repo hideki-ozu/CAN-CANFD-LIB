@@ -38,8 +38,23 @@ if [[ "$OMNETPP_ROOT" == "$_can_workspace/tools/omnetpp-6.4.0" && -d "$_can_work
     export M4="$OMNETPP_LOCAL_DEPS/usr/bin/m4"
     export QT_PLUGIN_PATH="$OMNETPP_LOCAL_DEPS/usr/lib/x86_64-linux-gnu/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
 fi
+# OpenSSL libcrypto for SecOC (AES-128-CMAC). Explicit OPENSSL_CFLAGS/OPENSSL_LIBS win;
+# otherwise headers unpacked by scripts/fetch-openssl-dev.sh, else the system package.
+if [[ -z "${OPENSSL_CFLAGS+x}" && -f "$_can_workspace/.local/openssl-dev/usr/include/openssl/evp.h" ]]; then
+    _can_ssl="$_can_workspace/.local/openssl-dev/usr/include"
+    export OPENSSL_CFLAGS="-I$_can_ssl"
+    for _can_arch in "$_can_ssl"/*/openssl/configuration.h; do
+        [[ -f "$_can_arch" ]] && OPENSSL_CFLAGS="$OPENSSL_CFLAGS -I$(dirname "$(dirname "$_can_arch")")"
+    done
+    # The unpacked libcrypto.so link is dangling; link the installed runtime library.
+    export OPENSSL_LIBS="${OPENSSL_LIBS:--l:libcrypto.so.3}"
+    unset _can_ssl _can_arch
+fi
+export OPENSSL_CFLAGS="${OPENSSL_CFLAGS:-}"
+export OPENSSL_LIBS="${OPENSSL_LIBS:--lcrypto}"
+export AUTOSAR_ROOT="$_can_workspace/autosar"
 export PATH="$OMNETPP_ROOT/bin:$INET_ROOT/bin:$PATH"
-export LD_LIBRARY_PATH="$OMNETPP_ROOT/lib:$INET_ROOT/src:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$OMNETPP_ROOT/lib:$INET_ROOT/src:$AUTOSAR_ROOT/src:${LD_LIBRARY_PATH:-}"
 export PYTHONPATH="$OMNETPP_ROOT/python:$INET_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
 export OMNETPP_IMAGE_PATH="$INET_ROOT/images${OMNETPP_IMAGE_PATH:+:$OMNETPP_IMAGE_PATH}"
 export INET_OMNETPP_OPTIONS="--image-path=$INET_ROOT/images"

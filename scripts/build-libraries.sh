@@ -11,5 +11,7 @@ make -C "$INET_ROOT" -j"$jobs" MODE=release
 make -C "$workspace/upstream/FiCo4OMNeT" makefiles
 make -C "$workspace/upstream/FiCo4OMNeT" -j"$jobs" MODE=release
 make -C "$workspace/upstream/CoRE4INET" -f Makefile.inet4 -j"$jobs"
+# AUTOSAR E2E/SecOC library (this repository), used by SignalsAndGateways and SOA4CoRE.
+make -C "$workspace/autosar" -j"$jobs"
 make -C "$workspace/upstream/SignalsAndGateways" -f Makefile.inet4 -j"$jobs"
 make -C "$workspace/upstream/SOA4CoRE" -f Makefile.inet4 -j"$jobs"

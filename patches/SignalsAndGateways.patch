@@ -383,18 +383,19 @@ index 8784c1f..b39ee10 100644
 +#endif
 diff --git a/Makefile.inet4 b/Makefile.inet4
 new file mode 100644
-index 0000000..88090f0
+index 0000000..fbc5e93
 --- /dev/null
 +++ b/Makefile.inet4
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,9 @@
 +# Focused native FiCo CAN adapters + INET4 packet gateway; legacy modules excluded.
 +INET_ROOT ?= $(abspath ../inet)
 +FICO_ROOT ?= $(abspath ../FiCo4OMNeT)
++AUTOSAR_ROOT ?= $(abspath ../../autosar)
 +.PHONY: all makefiles
 +all: makefiles
 +	$(MAKE) -C src-inet4 MODE=release
 +makefiles:
-+	cd src-inet4 && opp_makemake -f --deep --make-so -o SignalsAndGateways_INET4 -O out -I. -I../src -I../src/signalsandgateways/applications/can -I$(INET_ROOT)/src -I$(FICO_ROOT)/src -L$(INET_ROOT)/src -lINET -L$(FICO_ROOT)/src -lFiCo4OMNeT
++	cd src-inet4 && opp_makemake -f --deep --make-so -o SignalsAndGateways_INET4 -O out -I. -I../src -I../src/signalsandgateways/applications/can -I$(INET_ROOT)/src -I$(FICO_ROOT)/src -I$(AUTOSAR_ROOT)/src -L$(INET_ROOT)/src -lINET -L$(FICO_ROOT)/src -lFiCo4OMNeT -L$(AUTOSAR_ROOT)/src -lAutosarProtection
 diff --git a/src-inet4/signalsandgateways/inet4/CanEthernetApp.ned b/src-inet4/signalsandgateways/inet4/CanEthernetApp.ned
 new file mode 100644
 index 0000000..a98731a
@@ -2244,6 +2245,403 @@ index 0000000..5d935df
 +++ b/src-inet4/signalsandgateways/inet4/package.ned
 @@ -0,0 +1 @@
 +package signalsandgateways.inet4;
+diff --git a/src-inet4/signalsandgateways/inet4/protection/SecuredCanApps.cc b/src-inet4/signalsandgateways/inet4/protection/SecuredCanApps.cc
+new file mode 100644
+index 0000000..b70234e
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/protection/SecuredCanApps.cc
+@@ -0,0 +1,282 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// CAN/CAN-FD ECU applications with AUTOSAR E2E and SecOC. The sender protects each
++// data frame (E2E inside the Authentic I-PDU, SecOC FV+MAC appended at the end of the
++// CAN payload); the receiver verifies SecOC first, then E2E. Gateways forward the
++// payload bytes unchanged, so protection is end-to-end across CAN, Ethernet and AVTP.
++#include <map>
++#include <memory>
++
++#include "autosar/protection/ProtectionParams.h"
++#include "fico4omnet/applications/can/source/CanTrafficSourceAppBase.h"
++#include "fico4omnet/linklayer/can/CanFrameTiming.h"
++#include "fico4omnet/linklayer/can/messages/CanDataFrame_m.h"
++
++using namespace omnetpp;
++using namespace autosar;
++using FiCo4OMNeT::CanDataFrame;
++using FiCo4OMNeT::CanFrameTiming;
++
++namespace SignalsAndGateways {
++namespace {
++
++// Byte layout of one protected CAN payload.
++struct PduLayout {
++    size_t length = 0;          // CAN payload bytes
++    size_t authentic = 0;       // Authentic I-PDU bytes (E2E protected area)
++};
++
++PduLayout layoutFor(cComponent *owner, const ProtectionConfig& config, size_t length, unsigned canId)
++{
++    PduLayout layout;
++    layout.length = length;
++    const size_t trailer = config.secocEnabled ? secOcTrailerBytes(config.secoc) : 0;
++    if (trailer > length)
++        throw cRuntimeError(owner, "CAN ID %u: SecOC FV+MAC (%zu B) does not fit into %zu B", canId, trailer, length);
++    layout.authentic = length - trailer;
++    try {
++        validateE2EConfig(config.e2e, layout.authentic);
++    }
++    catch (const std::invalid_argument& e) {
++        throw cRuntimeError(owner, "CAN ID %u: %s (Authentic I-PDU %zu B)", canId, e.what(), layout.authentic);
++    }
++    return layout;
++}
++
++Bytes payloadOf(const CanDataFrame *frame)
++{
++    Bytes bytes(frame->getPayloadBytesArraySize());
++    for (size_t i = 0; i < bytes.size(); ++i)
++        bytes[i] = frame->getPayloadBytes(i);
++    return bytes;
++}
++
++} // namespace
++
++class SecuredCanSourceApp : public FiCo4OMNeT::CanTrafficSourceAppBase
++{
++    struct Stream {
++        PduLayout layout;
++        std::unique_ptr<E2EProtector> e2e;
++        std::unique_ptr<SecOcSender> secoc;
++        long sent = 0;
++        Bytes last;
++    };
++    std::map<unsigned, Stream> streams;
++    std::set<long> corruptAt, replayAt, skipAt;
++    long skipCount = 0, corrupted = 0, replayed = 0, skipped = 0;
++
++  protected:
++    virtual void initialize(int stage) override
++    {
++        CanTrafficSourceAppBase::initialize(stage);
++        if (stage == 0) {
++            corruptAt = parseIndexList(par("faultCorruptAt").stringValue());
++            replayAt = parseIndexList(par("faultReplayAt").stringValue());
++            skipAt = parseIndexList(par("faultSkipAt").stringValue());
++            skipCount = par("faultSkipCount").intValue();
++        }
++        else if (stage == 2) {
++            for (CanDataFrame *frame : outgoingDataFrames) {
++                const ProtectionConfig config = readProtectionConfig(this, frame->getCanID(), frame->getCanID());
++                Stream& stream = streams[frame->getCanID()];
++                stream.layout = layoutFor(this, config, frame->getPayloadLength(), frame->getCanID());
++                stream.e2e = std::make_unique<E2EProtector>(config.e2e);
++                if (config.secocEnabled)
++                    stream.secoc = std::make_unique<SecOcSender>(config.secoc);
++            }
++        }
++    }
++
++    virtual void prepareTransmission(CanDataFrame *frame) override
++    {
++        auto it = streams.find(frame->getCanID());
++        if (it == streams.end())
++            throw cRuntimeError("No protection state for CAN ID %u", frame->getCanID());
++        Stream& stream = it->second;
++        ++stream.sent;
++        Bytes pdu;
++        if (replayAt.count(stream.sent) && !stream.last.empty()) {
++            pdu = stream.last;      // previous PDU verbatim, counters unchanged
++            ++replayed;
++        }
++        else {
++            if (skipAt.count(stream.sent)) {
++                stream.e2e->skip(skipCount);
++                if (stream.secoc)
++                    stream.secoc->skip(skipCount);
++                skipped += skipCount;
++            }
++            pdu = payloadOf(frame);
++            stream.e2e->protect(pdu.data(), stream.layout.authentic);
++            if (stream.secoc)
++                pdu = stream.secoc->secure(pdu.data(), stream.layout.authentic);
++            stream.last = pdu;
++            if (corruptAt.count(stream.sent)) {
++                pdu[pdu.size() / 2] ^= 0x10;    // one bit error after protection
++                ++corrupted;
++            }
++        }
++        for (size_t i = 0; i < pdu.size(); ++i)
++            frame->setPayloadBytes(i, pdu[i]);
++    }
++
++    virtual void finish() override
++    {
++        long sent = 0;
++        for (const auto& entry : streams)
++            sent += entry.second.sent;
++        recordScalar("protectedFrames", sent);
++        recordScalar("faultCorrupted", corrupted);
++        recordScalar("faultReplayed", replayed);
++        recordScalar("faultSkippedCounters", skipped);
++    }
++};
++
++Define_Module(SecuredCanSourceApp);
++
++class SecuredCanSink : public cSimpleModule
++{
++    struct Stream {
++        PduLayout layout;
++        E2EConfig e2eConfig;
++        std::unique_ptr<E2EChecker> e2e;
++        std::unique_ptr<E2EStateMachine> sm;
++        std::unique_ptr<SecOcReceiver> secoc;
++        ProtectionStatistics stats;
++        long delivered = 0;
++        cMessage *timeout = nullptr;
++    };
++    std::map<unsigned, Stream> streams;
++    ProtectionStatistics total;
++    long received = 0, delivered = 0, patternErrors = 0;
++    simtime_t receptionTimeout;
++    simsignal_t rxSignal, idSignal, latencySignal, e2eStatusSignal, smStateSignal, secocResultSignal;
++
++    Stream& streamFor(const CanDataFrame *frame)
++    {
++        auto it = streams.find(frame->getCanID());
++        if (it != streams.end())
++            return it->second;
++        const ProtectionConfig config = readProtectionConfig(this, frame->getCanID(), frame->getCanID());
++        Stream& stream = streams[frame->getCanID()];
++        stream.layout = layoutFor(this, config, frame->getPayloadLength(), frame->getCanID());
++        stream.e2eConfig = config.e2e;
++        stream.e2e = std::make_unique<E2EChecker>(config.e2e);
++        stream.sm = std::make_unique<E2EStateMachine>(config.sm);
++        if (config.secocEnabled)
++            stream.secoc = std::make_unique<SecOcReceiver>(config.secoc);
++        if (receptionTimeout > 0) {
++            stream.timeout = new cMessage("e2eReceptionTimeout");
++            stream.timeout->setContextPointer(&stream);     // map nodes are stable
++        }
++        return stream;
++    }
++
++    void evaluate(Stream& stream, E2ECheckStatus status)
++    {
++        if (stream.e2eConfig.profile == E2EProfile::None)
++            return;
++        stream.stats.count(status);
++        total.count(status);
++        const E2ESmState state = stream.sm->check(status);
++        (state == E2ESmState::Valid ? stream.stats.smValid : stream.stats.smInvalid)++;
++        (state == E2ESmState::Valid ? total.smValid : total.smInvalid)++;
++        emit(e2eStatusSignal, long(status));
++        emit(smStateSignal, long(state));
++    }
++
++  protected:
++    virtual void initialize() override
++    {
++        rxSignal = registerSignal("received");
++        idSignal = registerSignal("canId");
++        latencySignal = registerSignal("endToEndDelay");
++        e2eStatusSignal = registerSignal("e2eStatus");
++        smStateSignal = registerSignal("e2eSmState");
++        secocResultSignal = registerSignal("secocResult");
++        receptionTimeout = par("e2eReceptionTimeout");
++    }
++
++    virtual void handleMessage(cMessage *message) override
++    {
++        if (message->isSelfMessage()) {
++            // No frame within the timeout: the cyclic check reports NONEWDATA.
++            Stream& stream = *static_cast<Stream *>(message->getContextPointer());
++            evaluate(stream, stream.e2e->check(nullptr, 0, false));
++            scheduleAfter(receptionTimeout, message);
++            return;
++        }
++        auto frame = check_and_cast<CanDataFrame *>(message);
++        CanFrameTiming::validateFrame(*frame);
++        if (frame->getPayloadBytesArraySize() != frame->getPayloadLength())
++            throw cRuntimeError("End-to-end payload length mismatch");
++        ++received;
++        Stream& stream = streamFor(frame);
++        if (frame->getPayloadLength() != stream.layout.length)
++            throw cRuntimeError("CAN ID %u: payload length changed from %zu to %u", frame->getCanID(),
++                                stream.layout.length, frame->getPayloadLength());
++        Bytes authentic = payloadOf(frame);
++        if (stream.secoc) {
++            const Bytes secured = authentic;
++            const SecOcVerifyResult result = stream.secoc->verify(secured.data(), secured.size(), authentic);
++            stream.stats.count(result);
++            total.count(result);
++            emit(secocResultSignal, long(result));
++            if (result != SecOcVerifyResult::Ok) {
++                // SecOC discards the PDU; E2E sees no new data for this reception.
++                delete frame;
++                return;
++            }
++        }
++        if (stream.timeout) {
++            // Only PDUs that pass SecOC reach E2E; discarded ones count as no new data.
++            cancelEvent(stream.timeout);
++            scheduleAfter(receptionTimeout, stream.timeout);
++        }
++        const E2ECheckStatus status = stream.e2eConfig.profile == E2EProfile::None
++                ? E2ECheckStatus::Ok : stream.e2e->check(authentic.data(), authentic.size());
++        evaluate(stream, status);
++        if (status == E2ECheckStatus::Ok || status == E2ECheckStatus::OkSomeLost) {
++            if (par("verifyPattern").boolValue()) {
++                const size_t first = stream.e2eConfig.offset, last = first + e2eHeaderBytes(stream.e2eConfig.profile);
++                for (size_t i = 0; i < authentic.size(); ++i)
++                    if ((i < first || i >= last) && authentic[i] != ((frame->getCanID() + i) & 0xFF)) {
++                        ++patternErrors;
++                        break;
++                    }
++            }
++            ++delivered;
++            ++stream.delivered;
++            emit(rxSignal, frame);
++            emit(idSignal, long(frame->getCanID()));
++            emit(latencySignal, simTime() - frame->getTimestamp());
++        }
++        delete frame;
++    }
++
++    virtual void finish() override
++    {
++        recordScalar("receivedFrames", received);
++        recordScalar("deliveredFrames", delivered);
++        recordScalar("patternErrors", patternErrors);
++        total.record(this, "");
++        for (auto& entry : streams) {
++            const std::string prefix = "id_" + std::to_string(entry.first) + "_";
++            recordScalar((prefix + "delivered").c_str(), entry.second.delivered);
++            recordScalar((prefix + "e2eSmFinalState").c_str(), int(entry.second.sm->state()));
++            entry.second.stats.record(this, prefix);
++        }
++    }
++
++  public:
++    virtual ~SecuredCanSink() override
++    {
++        for (auto& entry : streams)
++            cancelAndDelete(entry.second.timeout);
++    }
++};
++
++Define_Module(SecuredCanSink);
++
++} // namespace SignalsAndGateways
+diff --git a/src-inet4/signalsandgateways/inet4/protection/SecuredCanApps.ned b/src-inet4/signalsandgateways/inet4/protection/SecuredCanApps.ned
+new file mode 100644
+index 0000000..de909b4
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/protection/SecuredCanApps.ned
+@@ -0,0 +1,95 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++package signalsandgateways.inet4.protection;
++
++import fico4omnet.applications.ISinkApplication;
++import fico4omnet.applications.can.source.CanTrafficSourceAppBase;
++
++//
++// CAN/CAN-FD source application that protects every data frame with AUTOSAR E2E
++// and/or SecOC (autosar/protection). Payload layout of each frame:
++//
++//   | Authentic I-PDU: data with the E2E header at e2eOffset | SecOC FV | SecOC MAC |
++//
++// The E2E CRC covers the Authentic I-PDU; the SecOC MAC covers SecOCDataId, the
++// Authentic I-PDU and the complete freshness value. Data bytes outside the E2E header
++// keep the FiCo test pattern ((CAN ID + byte index) & 0xFF). The DataIDs default to
++// the CAN identifier. Fault injection acts after protection, per CAN ID, with 1-based
++// transmission indices.
++//
++simple SecuredCanSourceApp extends CanTrafficSourceAppBase
++{
++    parameters:
++        @class(SecuredCanSourceApp);
++        string e2eProfile @enum("none", "P01", "P02", "P04", "P05", "P07") = default("none");
++        int e2eDataId = default(-1);                 // -1 = CAN identifier
++        string e2eDataIdMode @enum("both", "alt", "low", "nibble") = default("both");
++        string e2eDataIdList = default("");          // P02: 16 byte values
++        int e2eOffset = default(0);                  // byte offset of the E2E header
++        int e2eMaxDeltaCounter = default(1);
++        int e2eSmWindowSize = default(3);
++        int e2eSmMinOkStateInit = default(1);
++        int e2eSmMaxErrorStateInit = default(1);
++        int e2eSmMinOkStateValid = default(1);
++        int e2eSmMaxErrorStateValid = default(1);
++        int e2eSmMinOkStateInvalid = default(2);
++        int e2eSmMaxErrorStateInvalid = default(0);
++        bool secocEnabled = default(false);
++        int secocDataId = default(-1);               // -1 = CAN identifier (must fit 16 bit)
++        string secocKey = default("000102030405060708090a0b0c0d0e0f");
++        int secocFreshnessBits = default(64);
++        int secocFreshnessTxBits = default(8);
++        int secocMacTxBits = default(24);
++        int secocAcceptanceWindow = default(0);
++        string faultCorruptAt = default("");         // flip one bit after protection
++        string faultReplayAt = default("");          // resend the previous PDU instead
++        string faultSkipAt = default("");            // advance E2E counter and FV first
++        int faultSkipCount = default(3);
++}
++
++//
++// Receiving ECU application: SecOC verification (failed PDUs are discarded), then
++// E2E check and E2E state machine per CAN ID. Frames with E2E status OK or
++// OKSOMELOST are delivered; their data bytes are compared with the FiCo pattern.
++//
++simple SecuredCanSink like ISinkApplication
++{
++    parameters:
++        @class(SecuredCanSink);
++        @display("i=block/sink");
++        string e2eProfile @enum("none", "P01", "P02", "P04", "P05", "P07") = default("none");
++        int e2eDataId = default(-1);
++        string e2eDataIdMode @enum("both", "alt", "low", "nibble") = default("both");
++        string e2eDataIdList = default("");
++        int e2eOffset = default(0);
++        int e2eMaxDeltaCounter = default(1);
++        int e2eSmWindowSize = default(3);
++        int e2eSmMinOkStateInit = default(1);
++        int e2eSmMaxErrorStateInit = default(1);
++        int e2eSmMinOkStateValid = default(1);
++        int e2eSmMaxErrorStateValid = default(1);
++        int e2eSmMinOkStateInvalid = default(2);
++        int e2eSmMaxErrorStateInvalid = default(0);
++        bool secocEnabled = default(false);
++        int secocDataId = default(-1);
++        string secocKey = default("000102030405060708090a0b0c0d0e0f");
++        int secocFreshnessBits = default(64);
++        int secocFreshnessTxBits = default(8);
++        int secocMacTxBits = default(24);
++        int secocAcceptanceWindow = default(0);
++        double e2eReceptionTimeout @unit(s) = default(0s);   // > 0: NONEWDATA after this silence
++        bool verifyPattern = default(true);
++        @signal[received](type=omnetpp::cPacket);
++        @signal[canId](type=long);
++        @signal[endToEndDelay](type=simtime_t);
++        @signal[e2eStatus](type=long);      // E2ECheckStatus: 0 OK, 1 NONEWDATA, 2 ERROR, 3 REPEATED, 4 OKSOMELOST, 5 WRONGSEQUENCE
++        @signal[e2eSmState](type=long);     // 0 NODATA, 1 INIT, 2 VALID, 3 INVALID
++        @signal[secocResult](type=long);    // 0 OK, 1 AUTHENTICATION_FAILED, 2 FRESHNESS_FAILED, 3 MALFORMED
++        @statistic[canId](record=vector);
++        @statistic[endToEndDelay](record=vector,stats);
++        @statistic[e2eStatus](record=vector; interpolationmode=none);
++        @statistic[e2eSmState](record=vector; interpolationmode=sample-hold);
++        @statistic[secocResult](record=vector; interpolationmode=none);
++    gates:
++        input controllerIn @directIn;
++        input dataIn @directIn;
++}
+diff --git a/src-inet4/signalsandgateways/inet4/protection/package.ned b/src-inet4/signalsandgateways/inet4/protection/package.ned
+new file mode 100644
+index 0000000..95e1950
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/protection/package.ned
+@@ -0,0 +1,2 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++package signalsandgateways.inet4.protection;
 diff --git a/src-inet4/signalsandgateways/package.ned b/src-inet4/signalsandgateways/package.ned
 new file mode 100644
 index 0000000..878b59c
