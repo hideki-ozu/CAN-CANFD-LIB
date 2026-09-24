@@ -26,6 +26,15 @@ std::array<uint8_t, 16> parseDataIdList(const char *text)
     return list;
 }
 
+// Reads an integer parameter that is stored in an unsigned field; a negative value would wrap.
+unsigned long long nonNegative(cComponent *module, const char *name)
+{
+    const long long value = module->par(name).intValue();
+    if (value < 0)
+        throw std::invalid_argument(std::string(name) + " must not be negative, got " + std::to_string(value));
+    return value;
+}
+
 } // namespace
 
 ProtectionConfig readProtectionConfig(cComponent *module, uint32_t e2eDefaultDataId, uint32_t secocDefaultDataId)
@@ -39,16 +48,16 @@ ProtectionConfig readProtectionConfig(cComponent *module, uint32_t e2eDefaultDat
         e2e.dataIdMode = parseP01DataIdMode(module->par("e2eDataIdMode").stdstringValue());
         if (e2e.profile == E2EProfile::P02)
             e2e.dataIdList = parseDataIdList(module->par("e2eDataIdList").stringValue());
-        e2e.offset = module->par("e2eOffset").intValue();
-        e2e.maxDeltaCounter = module->par("e2eMaxDeltaCounter").intValue();
+        e2e.offset = nonNegative(module, "e2eOffset");
+        e2e.maxDeltaCounter = nonNegative(module, "e2eMaxDeltaCounter");
         E2ESmConfig& sm = config.sm;
-        sm.windowSize = module->par("e2eSmWindowSize").intValue();
-        sm.minOkStateInit = module->par("e2eSmMinOkStateInit").intValue();
-        sm.maxErrorStateInit = module->par("e2eSmMaxErrorStateInit").intValue();
-        sm.minOkStateValid = module->par("e2eSmMinOkStateValid").intValue();
-        sm.maxErrorStateValid = module->par("e2eSmMaxErrorStateValid").intValue();
-        sm.minOkStateInvalid = module->par("e2eSmMinOkStateInvalid").intValue();
-        sm.maxErrorStateInvalid = module->par("e2eSmMaxErrorStateInvalid").intValue();
+        sm.windowSize = nonNegative(module, "e2eSmWindowSize");
+        sm.minOkStateInit = nonNegative(module, "e2eSmMinOkStateInit");
+        sm.maxErrorStateInit = nonNegative(module, "e2eSmMaxErrorStateInit");
+        sm.minOkStateValid = nonNegative(module, "e2eSmMinOkStateValid");
+        sm.maxErrorStateValid = nonNegative(module, "e2eSmMaxErrorStateValid");
+        sm.minOkStateInvalid = nonNegative(module, "e2eSmMinOkStateInvalid");
+        sm.maxErrorStateInvalid = nonNegative(module, "e2eSmMaxErrorStateInvalid");
 
         config.secocEnabled = module->par("secocEnabled").boolValue();
         SecOcConfig& secoc = config.secoc;
@@ -58,10 +67,10 @@ ProtectionConfig readProtectionConfig(cComponent *module, uint32_t e2eDefaultDat
             throw std::invalid_argument("secocDataId is 16 bit");
         secoc.dataId = uint16_t(selected);
         secoc.key = parseAesKey(module->par("secocKey").stdstringValue());
-        secoc.freshnessBits = module->par("secocFreshnessBits").intValue();
-        secoc.freshnessTxBits = module->par("secocFreshnessTxBits").intValue();
-        secoc.macTxBits = module->par("secocMacTxBits").intValue();
-        secoc.acceptanceWindow = module->par("secocAcceptanceWindow").intValue();
+        secoc.freshnessBits = nonNegative(module, "secocFreshnessBits");
+        secoc.freshnessTxBits = nonNegative(module, "secocFreshnessTxBits");
+        secoc.macTxBits = nonNegative(module, "secocMacTxBits");
+        secoc.acceptanceWindow = nonNegative(module, "secocAcceptanceWindow");
         if (config.secocEnabled)
             validateSecOcConfig(secoc);
     }

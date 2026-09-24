@@ -88,6 +88,10 @@ void validateSecOcConfig(const SecOcConfig& c)
         throw std::invalid_argument("SecOC freshnessTxBits must not exceed freshnessBits");
     if (c.macTxBits < 1 || c.macTxBits > 128)
         throw std::invalid_argument("SecOC macTxBits must be in 1..128");
+    // Without transmitted FV bits a lost PDU is invisible to the receiver; it resynchronises
+    // by trying every FV in the acceptance window, which therefore has to be bounded.
+    if (c.freshnessTxBits == 0 && c.acceptanceWindow == 0)
+        throw std::invalid_argument("SecOC freshnessTxBits 0 requires an acceptanceWindow of at least 1");
 }
 
 size_t secOcTrailerBytes(const SecOcConfig& c)
@@ -156,16 +160,28 @@ SecOcVerifyResult SecOcReceiver::verify(const uint8_t *secured, size_t length, B
     const size_t authenticLength = length - trailer;
     size_t pos = authenticLength * 8;
     const uint64_t truncated = getBits(secured, pos, config.freshnessTxBits);
-    const uint64_t candidate = reconstruct(truncated);
-    if (candidate <= latest)
+    const size_t macPos = pos;
+    const uint64_t first = reconstruct(truncated);
+    if (first <= latest)
         return SecOcVerifyResult::FreshnessFailed;       // only possible with the complete FV transmitted
-    if (config.acceptanceWindow != 0 && candidate - latest > config.acceptanceWindow)
+    if (config.acceptanceWindow != 0 && first - latest > config.acceptanceWindow)
         return SecOcVerifyResult::FreshnessFailed;
-    const Bytes toAuthenticate = secOcDataToAuthenticator(config, secured, authenticLength, candidate);
-    const auto mac = aesCmac(config.key, toAuthenticate.data(), toAuthenticate.size());
-    for (unsigned bit = 0; bit < config.macTxBits; bit += 8) {
-        const unsigned n = std::min(8u, config.macTxBits - bit);
-        if (getBits(secured, pos, n) != uint64_t(mac[bit / 8] >> (8 - n)))
+    // With transmitted FV bits there is one candidate; without, every FV up to latest + acceptanceWindow.
+    const uint64_t lastCandidate = config.freshnessTxBits == 0
+            ? std::min(latest + config.acceptanceWindow, lowBits(~0ull, config.freshnessBits)) : first;
+    uint64_t candidate = first;
+    for (;; ++candidate) {
+        const Bytes toAuthenticate = secOcDataToAuthenticator(config, secured, authenticLength, candidate);
+        const auto mac = aesCmac(config.key, toAuthenticate.data(), toAuthenticate.size());
+        bool match = true;
+        pos = macPos;
+        for (unsigned bit = 0; bit < config.macTxBits && match; bit += 8) {
+            const unsigned n = std::min(8u, config.macTxBits - bit);
+            match = getBits(secured, pos, n) == uint64_t(mac[bit / 8] >> (8 - n));
+        }
+        if (match)
+            break;
+        if (candidate >= lastCandidate)
             return SecOcVerifyResult::AuthenticationFailed;
     }
     latest = candidate;
