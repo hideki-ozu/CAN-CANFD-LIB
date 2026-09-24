@@ -26,7 +26,7 @@ AES-128-CMACは決定的なアルゴリズムで、正しい実装なら自前�
 
 - CRCは、保護対象バイト列のうちCRCフィールド以外の全バイトにかかります（ヘッダより前のバイトも含む。SOME/IPでは後述の上位ヘッダ8B）。P04/P07は長さとDataIDのフィールドも照合します。
 - 受信側のチェック結果（E2E_PCheckStatusType相当）: `OK`、`OKSOMELOST`（カウンタの飛びが`e2eMaxDeltaCounter`以下）、`REPEATED`、`WRONGSEQUENCE`、`ERROR`（CRC・DataID・長さ・P01のカウンタ15）、`NONEWDATA`（`e2eReceptionTimeout`の間、新しいデータなし。CANのみ）。
-- **E2E状態機械**: `NODATA`→`INIT`→`VALID`／`INVALID`。直近`e2eSmWindowSize`回の結果のうち、OK（OKSOMELOSTを含む）とERRORの数を、状態ごとの閾値（`e2eSmMinOkState*`、`e2eSmMaxErrorState*`）と比べます。REPEATED・WRONGSEQUENCE・NONEWDATAはどちらにも数えません。
+- **E2E状態機械**: `NODATA`→`INIT`→`VALID`／`INVALID`。直近`e2eSmWindowSize`回の結果のうち、OK（OKSOMELOSTを含む）とERRORの数を、状態ごとの閾値（`e2eSmMinOkState*`、`e2eSmMaxErrorState*`）と比べます。REPEATED・WRONGSEQUENCE・NONEWDATAはどちらにも数えません（AUTOSAR PRS_E2E_00466: ErrorCountはE2E_P_ERRORの数のみ。カウンタ異常はウィンドウの枠を占めるのでOKの数を減らします）。
 
 ### SecOC
 
@@ -38,6 +38,7 @@ MAC                 = AES-128-CMAC(key, DataToAuthenticator) を上位 secocMacT
 
 - FVは送信PDUごとに1ずつ増えるカウンタ（1から開始、`secocFreshnessBits`＝8～64bit）。`secocFreshnessTxBits` だけを送ります（0～全ビット）。
 - 受信側は最後に受理したFVから完全なFVを復元します。受信した下位ビットが最後の値の下位ビットより大きければ上位ビットはそのまま、そうでなければ上位ビット+1とします。復元値が最後の値以下なら `FRESHNESS_FAILED`（完全なFVを送る場合のみ起こる）、`secocAcceptanceWindow` を超える飛びも `FRESHNESS_FAILED` です。MACが一致しなければ `AUTHENTICATION_FAILED` です。
+- FVを送らない構成（`secocFreshnessTxBits=0`）では、受信側は最後の値+1から+`secocAcceptanceWindow`までのFVを順に試し、MACが一致したFVで同期し直します。PDUを失っても受理ウィンドウ内なら復帰できます。無制限の探索はできないため、この構成では `secocAcceptanceWindow` ≥ 1 が必須です（0なら設定エラー）。
 - 検証に失敗したPDUは破棄し、E2Eには渡しません。切り詰めたFVでは、再送（リプレイ）されたPDUの復元FVが新しい値になるため、MAC不一致（`AUTHENTICATION_FAILED`）として検出されます。
 - 重ね順は **E2Eが内側、SecOCが外側** です。E2EヘッダはAuthentic I-PDUの中にあり、MACの対象になります。
 
@@ -123,14 +124,14 @@ Publisher・Subscriber（`soa4core.applications.*`）に同名のパラメータ
 | `secocDataId` | `-1` | SecOCDataId（16bit） |
 | `secocKey` | `000102…0e0f` | AES-128鍵（16進32桁）。送受信で同じ値を設定 |
 | `secocFreshnessBits` / `secocFreshnessTxBits` / `secocMacTxBits` | `64` / `8` / `24` | 完全なFV長、送るFVのビット数、送るMACのビット数 |
-| `secocAcceptanceWindow` | `0` | 受理するFVの最大の飛び。0は無制限 |
+| `secocAcceptanceWindow` | `0` | 受理するFVの最大の飛び。0は無制限（`secocFreshnessTxBits=0` のときは1以上が必須） |
 | `faultCorruptAt` / `faultReplayAt` / `faultSkipAt` / `faultSkipCount` | `""` / `""` / `""` / `3` | 送信側のみ。故障注入（1から数える送信番号、CAN IDごと／エンドポイントごと） |
 
 スカラー結果（受信側）: `receivedFrames`（CAN）／`someipReceived`（SOME/IP）、`deliveredFrames`／`protectionDelivered`、`e2eOK`・`e2eOKSOMELOST`・`e2eREPEATED`・`e2eWRONGSEQUENCE`・`e2eERROR`・`e2eNONEWDATA`、`secocOK`・`secocAUTHENTICATION_FAILED`・`secocFRESHNESS_FAILED`・`secocMALFORMED`、`e2eSmValidReceptions`・`e2eSmInvalidReceptions`、`patternErrors`。CANではCAN IDごとに `id_<ID>_` 付きでも記録し、`id_<ID>_e2eSmFinalState`（0 NODATA、1 INIT、2 VALID、3 INVALID）もあります。送信側: `protectedFrames`／`protectedMessages`、`faultCorrupted`、`faultReplayed`。
 
 ## 検証（`tests/test_protection.py`）
 
-1. **自己試験（111項目、OMNeT++内）**: CRC 6種の "123456789" チェック値と連結計算、E2E P01（4モード）・P02・P04・P05・P07の既知解（autosar-e2eの試験に収録されたAUTOSAR例と同じ値。オフセット8のSOME/IP形式を含む）、全ビットの1bit誤り検出、各チェック結果とカウンタの折り返し、状態機械の遷移、RFC 4493のAES-CMACテストベクタ4件、SecOCのバイト配置、リプレイ・改ざん・鍵違い・FVの折り返しと欠落・同期外れ・受理ウィンドウ・ビット詰め・FVの枯渇。
+1. **自己試験（119項目、OMNeT++内）**: CRC 6種の "123456789" チェック値と連結計算、E2E P01（4モード）・P02・P04・P05・P07の既知解（autosar-e2eの試験に収録されたAUTOSAR例と同じ値。オフセット8のSOME/IP形式を含む）、全ビットの1bit誤り検出、各チェック結果とカウンタの折り返し、状態機械の遷移、RFC 4493のAES-CMACテストベクタ4件、SecOCのバイト配置、リプレイ・改ざん・鍵違い・FVの折り返しと欠落・同期外れ・受理ウィンドウ・ビット詰め・FVの枯渇、FVを送らない構成での欠落後の再同期・ウィンドウ超過・リプレイ、ヘッダ位置の桁あふれの拒否。
 2. **参照実装との照合**: C++で保護した乱数PDU（E2E 260件、SecOC 60件）を、C++やOpenSSLとは別の実装で検証します。E2Eは **autosar-e2e 1.0.0**（MIT）のcheckとprotectでバイト一致、MACは **pycryptodome 3.23.0** のCMACで一致を確認します。どちらも試験専用で、ハッシュ固定で `.local/venv-protection-test` に入れます。
 3. **CAN/CAN-FD 3構成**: 全8シンクで10フレームを受信・配送し、E2E OK・SecOC OK、パターン誤り0。AVTP構成は両ゲートウェイのpcapからCANペイロード40件を取り出し、参照実装でE2E（CRC・カウンタの連続性）とSecOC（FV・MAC）を検証します。
 4. **CANの故障注入**（ID 256の受信シンク。期待値はテスト内に手計算で記載）:

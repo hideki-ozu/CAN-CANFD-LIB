@@ -156,7 +156,7 @@ void validateE2EConfig(const E2EConfig& c, size_t length)
 {
     if (c.profile == E2EProfile::None)
         return;
-    if (c.offset + e2eHeaderBytes(c.profile) > length)
+    if ((c.offset > length || e2eHeaderBytes(c.profile) > length - c.offset))
         throw std::invalid_argument(std::string("E2E ") + toString(c.profile) + " header does not fit into "
                 + std::to_string(length) + " bytes at offset " + std::to_string(c.offset));
     if (c.maxDeltaCounter < 1 || c.maxDeltaCounter >= e2eCounterModulus(c.profile))
@@ -223,7 +223,7 @@ void e2eWrite(const E2EConfig& c, uint8_t *data, size_t length, uint64_t counter
 
 bool e2eVerify(const E2EConfig& c, const uint8_t *data, size_t length, uint64_t *counter)
 {
-    if (c.offset + e2eHeaderBytes(c.profile) > length)
+    if ((c.offset > length || e2eHeaderBytes(c.profile) > length - c.offset))
         return false;
     const uint8_t *h = data + c.offset;
     switch (c.profile) {
@@ -301,6 +301,9 @@ unsigned E2EStateMachine::okCount() const
     return n;
 }
 
+// [PRS_E2E_00466] E2E_SMAddStatus: ErrorCount is the number of E2E_P_ERROR entries only.
+// REPEATED and WRONGSEQUENCE are counter errors that occupy a window slot (and so lower
+// OKCount) but add to neither count; NONEWDATA likewise.
 unsigned E2EStateMachine::errorCount() const
 {
     unsigned n = 0;

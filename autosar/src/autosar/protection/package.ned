@@ -16,5 +16,5 @@
 //   int    secocFreshnessBits    complete FV length (8..64, multiple of 8)
 //   int    secocFreshnessTxBits  transmitted FV bits
 //   int    secocMacTxBits        transmitted MAC bits
-//   int    secocAcceptanceWindow largest accepted FV jump, 0 = unlimited
+//   int    secocAcceptanceWindow largest accepted FV jump, 0 = unlimited (must be >= 1 when secocFreshnessTxBits = 0)
 package autosar.protection;

@@ -133,7 +133,7 @@ def self_test():
     sca = next(selftest_dir.glob('*.sca')).read_text()
     passed = int(float(next(l.split()[-1] for l in sca.splitlines() if ' checksPassed ' in l)))
     failed = int(float(next(l.split()[-1] for l in sca.splitlines() if ' checksFailed ' in l)))
-    assert failed == 0 and passed >= 111, completed.stdout[-4000:]
+    assert failed == 0 and passed >= 119, completed.stdout[-4000:]
 
     data = json.loads(vectors.read_text())
     profiles = {}
@@ -401,7 +401,28 @@ def check_someip():
                  secocAUTHENTICATION_FAILED=DELIVERED)
     assert someip_endpoint(scalars, 'Node3') == wrong, someip_endpoint(scalars, 'Node3')
     report['SomeIpSecOcWrongKey'] = {'Node2': 'delivered', 'Node3': wrong}
+    report['rejected_configurations'] = check_rejected_configurations()
     return report
+
+
+# Invalid protection parameters stop the simulation with a clear error instead of being
+# converted to unsigned values (negative offset) or desynchronising for good (no FV bits).
+REJECTED = {
+    'negative-e2eOffset': ('--**.services[0].e2eOffset=-1', 'e2eOffset must not be negative'),
+    'negative-maxDeltaCounter': ('--**.services[0].e2eMaxDeltaCounter=-1', 'e2eMaxDeltaCounter must not be negative'),
+    'zero-fv-bits-without-window': ('--**.services[0].secocFreshnessTxBits=0',
+                                    'freshnessTxBits 0 requires an acceptanceWindow of at least 1'),
+}
+
+
+def check_rejected_configurations():
+    for name, (option, message) in REJECTED.items():
+        result_dir = RESULTS / f'rejected-{name}'
+        result = subprocess.run([str(ROOT / 'scripts' / 'run-someip.sh'), 'SomeIpE2eSecOc', f'--result-dir={result_dir}', option],
+                                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
+        (ROOT / 'logs' / f'test-rejected-{name}.log').write_text(result.stdout)
+        assert result.returncode != 0 and message in result.stdout, (name, result.stdout[-3000:])
+    return sorted(REJECTED)
 
 
 def main():

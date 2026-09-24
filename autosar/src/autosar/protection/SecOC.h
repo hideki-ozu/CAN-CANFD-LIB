@@ -6,7 +6,8 @@
 //   MAC                 = AES-128-CMAC (OpenSSL libcrypto), truncated to its most significant bits
 //
 // The receiver rebuilds the complete FV from the transmitted least significant bits and
-// its latest accepted FV, and accepts only a strictly newer FV (replay protection).
+// its latest accepted FV, and accepts only a strictly newer FV (replay protection). With no
+// FV bits transmitted it tries each FV from latest + 1 to latest + acceptanceWindow.
 #ifndef AUTOSAR_PROTECTION_SECOC_H
 #define AUTOSAR_PROTECTION_SECOC_H
 
@@ -29,7 +30,7 @@ struct SecOcConfig {
     uint16_t dataId = 0;
     AesKey key{};
     unsigned freshnessBits = 64;      // complete FV length, multiple of 8, 8..64
-    unsigned freshnessTxBits = 8;     // transmitted FV bits (0..freshnessBits)
+    unsigned freshnessTxBits = 8;     // transmitted FV bits (0..freshnessBits; 0 needs acceptanceWindow >= 1)
     unsigned macTxBits = 24;          // transmitted MAC bits (1..128)
     uint64_t acceptanceWindow = 0;    // max accepted FV jump; 0 = unlimited
 };

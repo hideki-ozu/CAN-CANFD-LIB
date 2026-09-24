@@ -203,6 +203,9 @@ class ProtectionSelfTest : public cSimpleModule
         rejected = false;
         try { E2EConfig p = e2e(E2EProfile::P02, 1, 2); validateE2EConfig(p, 8); } catch (const std::invalid_argument&) { rejected = true; }
         check("reject-P02-offset", rejected);
+        rejected = false;
+        try { validateE2EConfig(e2e(E2EProfile::P04, 1, size_t(-1)), 64); } catch (const std::invalid_argument&) { rejected = true; }
+        check("reject-offset-wraparound", rejected);
     }
 
     void testStateMachine()
@@ -220,6 +223,14 @@ class ProtectionSelfTest : public cSimpleModule
         for (auto s : {S::Ok, S::Ok, S::Repeated, S::Repeated, S::Repeated})
             repeated.check(s);
         check("sm-repeated-invalidates", repeated.state() == St::Invalid);
+        // [PRS_E2E_00466]: REPEATED and WRONGSEQUENCE are not E2E_P_ERROR; with 1 OK in the window
+        // and no ERROR the VALID state holds (minOkStateValid 1, maxErrorStateValid 1).
+        E2EStateMachine counterErrors(config);
+        for (auto s : {S::Ok, S::Ok, S::Repeated, S::WrongSequence})
+            counterErrors.check(s);
+        check("sm-counter-errors-not-error-count", counterErrors.state() == St::Valid);
+        counterErrors.check(S::Repeated);
+        check("sm-counter-errors-lower-ok-count", counterErrors.state() == St::Invalid);
     }
 
     void testCmac()
@@ -327,6 +338,30 @@ class ProtectionSelfTest : public cSimpleModule
             check("secoc-bit-packed", ok);
         }
         {
+            // No FV bits transmitted: the receiver tries latest+1 .. latest+acceptanceWindow.
+            SecOcConfig c = secoc(0, 32);
+            c.acceptanceWindow = 3;
+            SecOcSender tx(c);
+            SecOcReceiver rx(c);
+            Bytes out;
+            const Bytes s1 = tx.secure(authentic.data(), authentic.size());
+            check("secoc-zero-fv-ok", s1.size() == 8 && rx.verify(s1.data(), s1.size(), out) == R::Ok && rx.latestFreshness() == 1);
+            check("secoc-zero-fv-replay", rx.verify(s1.data(), s1.size(), out) == R::AuthenticationFailed);
+            tx.secure(authentic.data(), authentic.size());      // lost: FV 2
+            tx.secure(authentic.data(), authentic.size());      // lost: FV 3
+            const Bytes s4 = tx.secure(authentic.data(), authentic.size());
+            const Bytes s5 = tx.secure(authentic.data(), authentic.size());
+            check("secoc-zero-fv-resync-after-loss", rx.verify(s4.data(), s4.size(), out) == R::Ok && rx.latestFreshness() == 4
+                    && rx.verify(s5.data(), s5.size(), out) == R::Ok && rx.latestFreshness() == 5);
+            tx.skip(3);                                         // FV 9 is 4 ahead of 5: outside the window
+            const Bytes s9 = tx.secure(authentic.data(), authentic.size());
+            check("secoc-zero-fv-window-exceeded", rx.verify(s9.data(), s9.size(), out) == R::AuthenticationFailed
+                    && rx.latestFreshness() == 5);
+            bool rejectedUnbounded = false;
+            try { validateSecOcConfig(secoc(0, 32)); } catch (const std::invalid_argument&) { rejectedUnbounded = true; }
+            check("reject-secoc-zero-fv-without-window", rejectedUnbounded);
+        }
+        {
             SecOcSender tx(secoc(8, 24, 8));
             tx.skip(255);
             bool exhausted = false;
@@ -388,6 +423,7 @@ class ProtectionSelfTest : public cSimpleModule
         for (const auto& layout : layouts) {
             for (int n = 0; n < 10; ++n) {
                 SecOcConfig c = secoc(layout[0], layout[1], layout[2]);
+                c.acceptanceWindow = layout[0] == 0 ? 1 : 0;    // required without FV bits; no effect on the sender
                 c.dataId = uint16_t(rng->intRand(0x10000));
                 const Bytes key = randomBytes(16);
                 std::copy(key.begin(), key.end(), c.key.begin());
