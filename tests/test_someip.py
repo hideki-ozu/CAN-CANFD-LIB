@@ -8,6 +8,8 @@
    AUTOSAR PRS field tables, and Scapy's SOME/IP / SD implementation as reference.
 4. Negative scenarios: eventgroup mismatch, unknown service, instance mismatch.
 5. INET TSN devices: publisher pcp/vlan_id become IEEE 802.1Q C-tags on UDP notifications.
+6. Two subscribers on one host requesting different instances get separate connectors.
+7. SD entries referencing the second option run (valid and out of range).
 """
 import json
 import os
@@ -339,7 +341,7 @@ def main():
     sca = next(selftest_dir.glob('*.sca')).read_text()
     passed = int(float(next(l.split()[-1] for l in sca.splitlines() if ' checksPassed ' in l)))
     failed = int(float(next(l.split()[-1] for l in sca.splitlines() if ' checksFailed ' in l)))
-    assert failed == 0 and passed >= 19, completed.stdout[-4000:]
+    assert failed == 0 and passed >= 21, completed.stdout[-4000:]
     report['codec_selftest'] = {'passed': passed, 'failed': failed}
 
     for config in CONFIGS:
@@ -379,6 +381,31 @@ def main():
     assert scalars['Node3.services[0]', 'rxPk:count'] == DELIVERED
     negative['wrong_instance'] = {'subscribes': 0, 'delivered': 0}
     report['negative'] = negative
+
+    # Two subscribers on Node2 request instance 1 (Node1) and instance 2 (Node3) over SOME/IP UDP:
+    # separate connectors and endpoints, and each port only receives its own publisher's events.
+    scalars, _, result_dir = run('SomeIpTwoInstances')
+    for index in (0, 1):
+        assert scalars[f'Node2.services[{index}]', 'rxPk:count'] == DELIVERED, (index, scalars[f'Node2.services[{index}]', 'rxPk:count'])
+        assert scalars[f'Node2.middleware.subscriberEndpoints[{index}]', 'someipReceived'] == DELIVERED
+        assert scalars[f'Node2.middleware.subscriberEndpoints[{index}]', 'someipInvalid'] == 0
+    sources = {}
+    for _, proto, src, sport, dst, dport, payload, _ in ip_packets(result_dir / 'Node2.pcap'):
+        if proto == 'udp' and dst == IP['Node2'] and sport == PUBLISHER_PORT:
+            sources.setdefault(dport, []).append(src)
+    assert {port: set(srcs) for port, srcs in sources.items()} == {3172: {IP['Node1']}, 3174: {IP['Node3']}}, sources
+    assert all(len(srcs) == DELIVERED for srcs in sources.values()), {port: len(srcs) for port, srcs in sources.items()}
+    report['SomeIpTwoInstances'] = {'delivered_each': DELIVERED, 'instance1_from': IP['Node1'], 'instance2_from': IP['Node3']}
+
+    # SD entries reference two option runs: an Offer whose endpoint is only in the second run is
+    # accepted (Node3 subscribes), and an out-of-range second run counts as an invalid reference.
+    scalars, _, _ = run('SomeIpSecondOptionRun')
+    assert scalars['Node3.middleware.sd', 'sdEntriesReceivedOffer'] >= 2
+    assert scalars['Node3.middleware.sd', 'sdEntriesSentSubscribe'] >= 1
+    assert scalars['Node3.middleware.sd', 'sdInvalidOptionReferences'] == 1
+    assert scalars['Node3.middleware.sd', 'sdMessagesInvalid'] == 0
+    assert scalars['Node2.services[0]', 'rxPk:count'] == DELIVERED
+    report['SomeIpSecondOptionRun'] = {'subscribes': scalars['Node3.middleware.sd', 'sdEntriesSentSubscribe'], 'invalid_references': 1}
 
     path = RESULTS / 'report.json'
     path.write_text(json.dumps(report, indent=2) + '\n')
