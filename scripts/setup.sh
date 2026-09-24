@@ -14,4 +14,5 @@ python3 "$workspace/tests/test_mixed.py"
 python3 "$workspace/tests/test_avtp.py"
 python3 "$workspace/tests/test_someip.py"
 python3 "$workspace/tests/test_protection.py"
+python3 "$workspace/tests/test_av.py"
 printf '\nSetup and validation passed. GUI: ./scripts/run-gui.sh Mixed\n'

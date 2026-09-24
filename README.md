@@ -4,7 +4,7 @@
 
 対象は **OMNeT++ 6.4.0 / INET 4.7.0 / Linux・WSL2**。通常のセットアップは既存OMNeT++の設定・ソース・ビルド成果物を変更せず、管理者権限も使いません。INETやCoRE関連ライブラリが未導入の状態から実行できます。
 
-**対応範囲:** CAN本体の **FiCo4OMNeT** をCAN-FD対応に改修し、SignalsAndGatewaysをINET4へ接続しています。CAN/CAN-FDのEthernet転送は、独自ヘッダに加えて **IEEE 1722 AVTP**（NTSCF/TSCF + ACF CAN/CAN Brief、EtherType 0x22F0）に対応します（[詳細](docs/AVTP.md)）。サービス指向通信として、**SOA4CoREのSOME/IP・SOME/IP-SD**をINET4へ移植しています（[詳細](docs/SOMEIP.md)）。CAN/CAN-FDフレームとSOME/IPイベントには **AUTOSAR E2E**（Profile 1/2/4/5/7、状態機械）と **SecOC**（AES-128-CMAC、フレッシュネス値）を付けられます（[詳細](docs/PROTECTION.md)）。CoRE4INETは既存 `BGTrafficSourceApp` の選択移植です。旧CoRE4INET全体の移植ではなく、AS6802/TTEthernet、旧AVB/SRP、旧Qbv等は未移植です。CAN-FDの時間計算はイベント単位の近似です。[詳細](docs/CORE_PORT.md)
+**対応範囲:** CAN本体の **FiCo4OMNeT** をCAN-FD対応に改修し、SignalsAndGatewaysをINET4へ接続しています。CAN/CAN-FDのEthernet転送は、独自ヘッダに加えて **IEEE 1722 AVTP**（NTSCF/TSCF + ACF CAN/CAN Brief、EtherType 0x22F0）に対応します（[詳細](docs/AVTP.md)）。サービス指向通信として、**SOA4CoREのSOME/IP・SOME/IP-SD**をINET4へ移植しています（[詳細](docs/SOMEIP.md)）。CAN/CAN-FDフレームとSOME/IPイベントには **AUTOSAR E2E**（Profile 1/2/4/5/7、状態機械）と **SecOC**（AES-128-CMAC、フレッシュネス値）を付けられます（[詳細](docs/PROTECTION.md)）。デジタルラジオ・TVの転送用に、IEEE 1722の **AAF（PCM音声）・IEC 61883-4（MPEG-2 TS）・CRF（メディアクロック）** のストリームを、TSN（SRクラスA/B、CBS）とgPTPの上で扱えます（[詳細](docs/AV.md)）。CoRE4INETは既存 `BGTrafficSourceApp` の選択移植です。旧CoRE4INET全体の移植ではなく、AS6802/TTEthernet、旧AVB/SRP、旧Qbv等は未移植です。CAN-FDの時間計算はイベント単位の近似です。[詳細](docs/CORE_PORT.md)
 
 ## Claude Codeにセットアップを依頼する
 
@@ -62,7 +62,7 @@ BUILD_JOBS=4 ./scripts/setup.sh 2>&1 | tee logs/setup.log
 2. `sources.lock.json` のコミットでINET、FiCo4OMNeT、CoRE4INET、SignalsAndGateways、SOA4CoRE、Open1722（AVTP試験専用の参照デコーダ。シミュレーションにはリンクしない）を `upstream/` に取得。
 3. `patches/` の改修を適用。適用済みなら再適用せず、異なるコミットや競合する変更があれば停止。
 4. INETと4つの改修ライブラリ、本リポジトリのAUTOSAR保護ライブラリ（`autosar/`）を **MODE=release** でビルド。
-5. CAN単体の15項目、混在ネットワーク4構成、IEEE 1722 AVTPの検証（自己試験33項目・9構成（TSN・gPTPを含む）・pcap/Open1722照合・異常系4件）、SOME/IPの検証（自己試験19項目・4構成・pcap/Scapy照合・異常系3件）、E2E/SecOCの検証（自己試験111項目・参照実装照合320件・CAN 6構成・SOME/IP 4構成・pcap照合・故障注入）を実行。
+5. CAN単体の15項目、混在ネットワーク4構成、IEEE 1722 AVTPの検証（自己試験33項目・9構成（TSN・gPTPを含む）・pcap/Open1722照合・異常系4件）、SOME/IPの検証（自己試験19項目・4構成・pcap/Scapy照合・異常系3件）、E2E/SecOCの検証（自己試験111項目・参照実装照合320件・CAN 6構成・SOME/IP 4構成・pcap照合・故障注入）、AVストリームの検証（自己試験50項目・5構成・pcap/Open1722照合・異常系2件）を実行。
 
 使用したOMNeT++のパスは、Git管理外の `.local/omnetpp-root` に保存します。次の端末でも起動スクリプトが参照します。`OMNETPP_ROOT` の明示指定が最優先です。
 
@@ -79,7 +79,8 @@ BUILD_JOBS=4 ./scripts/setup.sh 2>&1 | tee logs/setup.log
 ./scripts/run-someip.sh SomeIpTcpUdp   # SOME/IP-SDで発見・購読しSOME/IPで通知（GUI: run-someip-gui.sh）
 ./scripts/run-mixed.sh E2eSecOcAvtp    # CAN/CAN-FDをE2E + SecOCで保護し、IEEE 1722で転送
 ./scripts/run-someip.sh SomeIpE2eSecOc # SOME/IPイベントをE2E P04 + SecOCで保護
-make test                         # 動作確認を再実行（個別は make test-avtp / make test-someip / make test-protection）
+./scripts/run-av.sh AvTsnGptp         # ラジオ音声（AAF）・TV（MPEG-2 TS）・CRFをTSN + gPTPで転送（GUI: run-av-gui.sh）
+make test                         # 動作確認を再実行（個別は make test-avtp / make test-someip / make test-protection / make test-av）
 ```
 
 | 設定 | 内容 |
@@ -101,6 +102,8 @@ make test                         # 動作確認を再実行（個別は make te
 | `E2eP02P07Avtp` | Classical CANにP02（SecOCなし）、CAN-FDにP07 + SecOC（MAC 128bit） |
 | `E2eSecOcFaults` / `E2eOnlyFaults` / `SecOcWrongKey` | 1bit誤り・再送・カウンタ飛び・鍵違いの故障注入（SecOCあり／E2Eのみ） |
 
+AVストリーム（`run-av.sh`）には `AvBasic`、`AvOverload`、`AvTsn`、`AvTsnGptp`、`AvTsnFreeRunning` があります。[docs/AV.md](docs/AV.md)
+
 SOME/IP側（`run-someip.sh`）には `SomeIpE2eSecOc`、`SomeIpE2eP07Mcast`、`SomeIpE2eSecOcFaults`、`SomeIpSecOcWrongKey` があります。[docs/PROTECTION.md](docs/PROTECTION.md)
 
 例: `./scripts/run-mixed.sh LoadedEthernet`。GUIの例: `./scripts/run-gui.sh FdNoBrs`。
@@ -111,6 +114,7 @@ SOME/IP側（`run-someip.sh`）には `SomeIpE2eSecOc`、`SomeIpE2eP07Mcast`、`
 - `results/avtp/report.json`: AVTP自己試験（`failed: 0`）、9構成の送受信・ワイヤ検証、異常系、TSN比較の結果。
 - `results/someip/report.json`: SOME/IP自己試験（`failed: 0`）、3構成の配送・ワイヤ検証（Scapy照合）、TSN（PCP/VLAN）、異常系の結果。`results/someip/<設定>/Node*.pcap` はSOME/IP・SOME/IP-SDの記録。
 - `results/protection/report.json`: E2E/SecOC自己試験（`failed: 0`）、参照実装との照合件数、CAN・SOME/IPの各構成の配送数とE2E/SecOC判定の内訳、ワイヤ検証の結果。
+- `results/av/report.json`: AVストリームの自己試験（`failed: 0`）、各構成のメディアクロック速度・提示時刻誤差・最大伝送時間、ワイヤ検証の件数。`results/av/<設定>/*.pcap` はAVTPフレームの記録。
 - `results/mixed/Avtp*/gatewayA.pcap`・`gatewayB.pcap`: AVTPフレームの記録（ナノ秒精度pcap）。
 - `logs/`: 混在テストのログ。CAN単体のログは `results/canfd/`。
 
@@ -164,7 +168,7 @@ flowchart LR
 |---|---|
 | `upstream/FiCo4OMNeT` | CAN-FDフィールド、DLC・ID検証、BRS、送受信共通時間計算、11/29bit仲裁、待ち行列、C++17対応、送信直前にペイロードを書き換えるフック（E2E/SecOC用） |
 | `upstream/CoRE4INET` | 既存BGTrafficSourceAppをINET4 Packet/ChunkとEthernetSocketIoへ移植。`Makefile.inet4` で選択ビルド |
-| `upstream/SignalsAndGateways` | 既存CAN側アプリを改修、INET4 FieldsChunkによる双方向ゲートウェイと、IEEE 1722 AVTPゲートウェイ（`src-inet4/.../avtp/`）、E2E/SecOCで保護するCAN送受信アプリ（`src-inet4/.../protection/`）を追加。`Makefile.inet4` で選択ビルド |
+| `upstream/SignalsAndGateways` | 既存CAN側アプリを改修、INET4 FieldsChunkによる双方向ゲートウェイと、IEEE 1722 AVTPゲートウェイ（`src-inet4/.../avtp/`）、E2E/SecOCで保護するCAN送受信アプリ（`src-inet4/.../protection/`）、AAF・IEC 61883-4・CRFのAVストリーム（`src-inet4/.../avtp/media/`）を追加。`Makefile.inet4` で選択ビルド |
 | `upstream/inet` | 公式v4.7.0をビルド。独自のプロトコル改修なし |
 | `upstream/SOA4CoRE` | `src-inet4/` にSOME/IP・SOME/IP-SD経路をINET4へ移植（元の `src/` は未変更）。`Makefile.inet4` でビルド。AVB/SRP、QoSネゴシエーション、ゲートウェイ、同期パブリッシャは未移植。SOME/IPエンドポイントでE2E/SecOC（`src-inet4/soa4core/protection/`） |
 | `autosar/`（本リポジトリ） | AUTOSAR CRCライブラリ、E2E P01/P02/P04/P05/P07と状態機械、SecOC（OpenSSL libcryptoのCMAC）。INETに依存しない共通ライブラリ `libAutosarProtection.so` |
@@ -180,6 +184,7 @@ flowchart LR
 - FDのRTR、FDバス上の確率的エラー注入は明示的に拒否します。同一ID・同一形式の複数データ送信元による同時競合も、ビット衝突モデルがないため拒否します。同一送信元の待ち行列は許可します。
 - ゲートウェイはデータフレーム用です。CAN ID・FD/BRS・形式・DLC・ペイロード全バイト・生成時刻を保持します。既定の `CanEthernetApp` は24Bの独自シミュレーション用ヘッダで、実機の標準カプセル化仕様ではありません。宣言済みFCSのパケットシミュレーション専用です。
 - E2E/SecOCは送受信ECU（SOME/IPはエンドポイント）で処理し、ゲートウェイは透過です。E2E状態機械は単一ウィンドウ（R4.2相当）、SecOCの鍵はiniで静的に共有し、MACの計算時間は0として扱います。SecOCのFV復元手順とSOME/IPへの適用方法は仕様本文と未照合の部分があります。[docs/PROTECTION.md](docs/PROTECTION.md#未対応事項前提)
+- AVストリームのデータは合成（PCM試験パターン、構文上正しいMPEG-2 TS）で、デコード・表示・再生バッファのモデルはありません。CVF・RVF・61883-6・AVDECC・SRPは未対応です。[docs/AV.md](docs/AV.md#未対応事項前提)
 - 標準形式が必要な場合は `AvtpCanGatewayApp`（IEEE 1722 AVTP）を使います。バイト精度のserializerを持ち、計算FCSとPCAP記録に対応します。INETのTSN機能（802.1Qタグ付け、クレジットベースシェーパ、gPTP）と組み合わせて使えます（`AvtpTsn*` 構成）。SRPプロトコル自体は静的設定で代替、ACF CAN v1形式のみです。[docs/AVTP.md](docs/AVTP.md)
 - Qtenv 2D表示は動作確認済みです。検証元のOMNeT++ではOSG・組込みPython・scave Pythonバインディングを無効にしていましたが、本リポジトリの通常セットアップは導入先の設定を変更しません。
 

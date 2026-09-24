@@ -98,3 +98,13 @@ TSN構成のpcapでは、全AVTPフレームに802.1Qタグ（PCP 3、VID 2、�
 - パッチを固定コミットの未改修cloneに適用し、別ディレクトリでFiCo4OMNeT・CoRE4INET・AUTOSAR保護ライブラリ・SignalsAndGateways・SOA4CoREをビルドして `tests/test_protection.py` が成功（INETは既存のビルドを共有、試験用venvは新規作成）。
 
 環境: OpenSSL 3.0.13（Ubuntu 24.04のlibssl3。開発ヘッダは `scripts/fetch-openssl-dev.sh` で `.local/` に展開）。
+
+## IEEE 1722 AVストリーム（2026-09-24）
+
+`python3 tests/test_av.py` がすべて成功しました（結果: `results/av/report.json`）。詳細は [AV.md](AV.md) を参照してください。
+
+- 自己試験50項目（AAF・CRF・IEC 61883-4の手計算ゴールデンバイト列、不正PDU 26種、MPEG-2 TS／PCR／CRC）。
+- 5構成（理想、TSNなし過負荷、TSN、TSN+gPTP、同期なし）。同期時は全listenerが生成速度の1ppm以内で再生、提示時刻誤差は±1us未満。
+- ワイヤ検証: AAF 15120件・CRF 96件をOpen1722で、61883-4 7558PDU（TSパケット約2万件）を独立パーサで検証。受信側pcapと送信側のバイト一致。
+- 変異試験5件をすべて検出（うちPCR拡張ビットは試験強化後に検出）。
+- パッチを固定コミットの未改修SignalsAndGatewaysに適用し、作業ツリーと一致することを確認。
