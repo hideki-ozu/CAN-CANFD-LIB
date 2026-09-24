@@ -2231,6 +2231,2362 @@ index 0000000..fca71c5
 +Register_Serializer(AcfCanMessage, AcfCanMessageSerializer);
 +
 +} // namespace SignalsAndGateways
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMedia.msg b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMedia.msg
+new file mode 100644
+index 0000000..c7af3e3
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMedia.msg
+@@ -0,0 +1,106 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// IEEE 1722-2016 media stream formats: AAF PCM audio (subtype 0x02), Clock Reference
++// Format (CRF, 0x04) and IEC 61883-4 MPEG-2 transport streams (61883/IIDC, 0x00).
++// Field layout per the standard's tables (cross-checked with COVESA Open1722, the
++// Wireshark IEEE 1722 dissector and the OpenAvnu MPEG2-TS mapping).
++import inet.common.INETDefs;
++import inet.common.packet.chunk.Chunk;
++import inet.common.TagBase;
++
++namespace SignalsAndGateways;
++
++cplusplus {{
++static const uint8_t AVTP_SUBTYPE_61883_IIDC = 0x00;
++static const uint8_t AVTP_SUBTYPE_AAF = 0x02;
++static const uint8_t AVTP_SUBTYPE_CRF = 0x04;
++static const int AVTP_AAF_HEADER_BYTES = 24;
++static const int AVTP_CRF_HEADER_BYTES = 20;
++static const int AVTP_61883_HEADER_BYTES = 24;
++static const int AVTP_CIP_HEADER_BYTES = 8;
++static const int IEC61883_4_SOURCE_PACKET_BYTES = 192;   // 4-byte source packet header + TS packet
++static const int MPEG_TS_PACKET_BYTES = 188;
++}}
++
++// AAF with a PCM format (24 bytes).
++class AvtpAafPcmHeader extends inet::FieldsChunk
++{
++    chunkLength = inet::B(24);
++    uint8_t subtype = AVTP_SUBTYPE_AAF;
++    bool sv = true;
++    uint8_t version = 0;
++    bool mr = false;            // media clock restart
++    bool tv = true;             // avtp_timestamp valid
++    uint8_t sequenceNum;
++    bool tu = false;
++    uint64_t streamId;
++    uint32_t avtpTimestamp;     // presentation time of the first sample, gPTP ns mod 2^32
++    uint8_t format;             // 0x02 INT_32BIT, 0x03 INT_24BIT, 0x04 INT_16BIT
++    uint8_t nsr;                // nominal sample rate code (4 bits)
++    uint16_t channelsPerFrame;  // 10 bits
++    uint8_t bitDepth;
++    uint16_t streamDataLength;
++    bool sp = false;            // sparse timestamp mode
++    uint8_t evt = 0;            // 4 bits
++}
++
++// CRF header (20 bytes) followed by crf_data (64-bit timestamps).
++class AvtpCrfPdu extends inet::FieldsChunk
++{
++    uint8_t subtype = AVTP_SUBTYPE_CRF;
++    bool sv = true;
++    uint8_t version = 0;
++    bool mr = false;
++    bool fs = false;            // frame sync
++    bool tu = false;
++    uint8_t sequenceNum;
++    uint8_t type;               // 0x01 audio sample, 0x02 video frame, ...
++    uint64_t streamId;
++    uint8_t pull;               // 3 bits, base_frequency multiplier
++    uint32_t baseFrequency;     // 29 bits, Hz
++    uint16_t crfDataLength;
++    uint16_t timestampInterval; // media clock events between two timestamps
++    uint64_t crfTimestamp[];    // gPTP ns
++}
++
++// 61883/IIDC header (24 bytes) with the IEC 61883-1 CIP header (8 bytes) for
++// IEC 61883-4 (MPEG-2 TS). The source packets (192 bytes each) follow as bytes.
++class Avtp61883Header extends inet::FieldsChunk
++{
++    chunkLength = inet::B(32);
++    uint8_t subtype = AVTP_SUBTYPE_61883_IIDC;
++    bool sv = true;
++    uint8_t version = 0;
++    bool mr = false;
++    bool gv = false;            // gateway_info valid
++    bool tv = true;
++    uint8_t sequenceNum;
++    bool tu = false;
++    uint64_t streamId;
++    uint32_t avtpTimestamp;     // presentation time of the first source packet
++    uint32_t gatewayInfo = 0;
++    uint16_t streamDataLength;  // CIP header + source packets
++    uint8_t tag = 1;            // 2 bits: 01 = CIP header included
++    uint8_t channel = 31;       // 6 bits: 31 = native AVTP
++    uint8_t tcode = 0x0A;       // 4 bits
++    uint8_t sy = 0;             // 4 bits
++    // CIP header, quadlet 1: 00 | SID | DBS | FN QPC SPH rsv | DBC
++    uint8_t sid = 63;           // 63 = no 1394 source node
++    uint8_t dbs = 6;            // data block size in quadlets
++    uint8_t fn = 3;             // 3 = 8 data blocks per source packet
++    uint8_t qpc = 0;
++    bool sph = true;            // source packet headers present
++    uint8_t dbc;                // data block counter of the first data block
++    // CIP header, quadlet 2: 10 | FMT | FDF
++    uint8_t fmt = 0x20;         // IEC 61883-4 MPEG2-TS
++    bool tsf = false;           // time shift flag
++}
++
++// Simulation-only metadata (not on the wire): creation time at the talker and the
++// instant (simulation time) at which the talker's own gPTP clock reaches the
++// presentation time, to measure the listener's presentation error.
++class AvtpMediaOriginTag extends inet::TagBase
++{
++    simtime_t sourceTime;
++    simtime_t intendedPresentationTime = -1;
++}
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMedia.ned b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMedia.ned
+new file mode 100644
+index 0000000..42f419a
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMedia.ned
+@@ -0,0 +1,198 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++package signalsandgateways.inet4.avtp.media;
++
++import inet.applications.contract.IApp;
++import inet.common.SimpleModule;
++
++// A media stream endpoint (talker or listener) inside AvtpMediaEndpoint.
++moduleinterface IAvtpMediaStream
++{
++    parameters:
++        @display("i=block/app");
++    gates:
++        input in;
++        output out;
++}
++
++// Registers EtherType 0x22F0 once for the node and connects the streams.
++simple AvtpStreamMux extends SimpleModule
++{
++    parameters:
++        @class(AvtpStreamMux);
++        @display("i=block/join");
++    gates:
++        input socketIn;
++        output socketOut;
++        input talkerIn[];
++        output listenerOut[];
++}
++
++// Parameters shared by all media talkers and listeners.
++simple AvtpMediaStreamBase extends SimpleModule
++{
++    parameters:
++        @lifecycleSupport;
++        string interfaceTableModule;
++        string interface = default("eth0");
++        string clockModule = default("");        // gPTP clock (e.g. "^.^.clock"); "" = simulation time
++        // talker
++        string destAddress = default("");        // stream destination MAC; "" = not a talker
++        string streamId = default("");           // 64-bit; default interface MAC << 16 | streamUniqueId
++        int streamUniqueId = default(1);
++        double maxTransitTime @unit(s) = default(2ms);   // presentation time offset (SR class A: 2 ms)
++        double startTime @unit(s) = default(10ms);
++        double stopTime @unit(s) = default(-1s);  // -1 = until the end of the simulation
++        double mediaClockPpm = default(0);        // media clock rate offset against the talker's gPTP clock
++        // listener
++        string listenAddress = default("");      // stream MAC to receive; "" = not a listener
++        string listenStreamId = default("");     // accept only this stream ID; "" = any
++        string latePresentationPolicy @enum("play","drop") = default("play");
++        double processingDelay @unit(s) = default(5us);
++        @signal[presentationSlack](type=simtime_t);
++        @signal[presentationLateness](type=simtime_t);
++        @signal[presentationError](type=simtime_t);
++        @signal[avtpPduLength](type=long);
++        @statistic[presentationSlack](record=stats);         // presentation time - earliest possible release
++        @statistic[presentationLateness](record=stats,vector);
++        @statistic[presentationError](record=stats,vector);  // listener release - talker's intended instant
++        @statistic[avtpPduLength](record=stats);
++    gates:
++        input in;
++        output out;
++}
++
++//
++// AAF PCM talker (IEEE 1722 subtype 0x02): 'channels' interleaved samples per frame,
++// 'samplesPerPdu' frames per PDU, big-endian, bitDepth valid bits left-justified in
++// the container. avtp_timestamp = capture time of the first sample + maxTransitTime.
++// Content: synthetic test pattern (AvtpMediaCodec.h, pcmPatternSample).
++// Class A at 48 kHz: 6 samples per PDU (8000 PDUs/s).
++//
++simple AafTalker extends AvtpMediaStreamBase like IAvtpMediaStream
++{
++    parameters:
++        @class(AafTalker);
++        string format @enum("int16","int24","int32") = default("int16");
++        int bitDepth = default(-1);             // -1 = container size
++        int sampleRate @unit(Hz) = default(48000Hz);
++        int channels = default(2);
++        int samplesPerPdu = default(6);
++        int patternStep = default(331);         // odd
++}
++
++// AAF PCM listener: plays each PDU at its presentation time, checks the sample
++// pattern and continuity, and recovers the sample rate from the timestamps.
++simple AafListener extends AvtpMediaStreamBase like IAvtpMediaStream
++{
++    parameters:
++        @class(AafListener);
++        int patternStep = default(331);
++        @signal[samplesPlayed](type=long);
++        @statistic[samplesPlayed](record=sum,vector);
++}
++
++//
++// IEC 61883-4 MPEG-2 TS talker (subtype 0x00 with CIP header, FMT 0x20). A synthetic
++// transport stream at 'bitrate' (PAT, PMT, H.264 video PID 0x100 with PCR, AAC audio
++// PID 0x110) is packed every pduInterval into up to maxSourcePacketsPerPdu source
++// packets; each source packet header holds that packet's presentation time.
++// SR class B: pduInterval 250us, maxTransitTime 50ms.
++//
++simple Iec61883TsTalker extends AvtpMediaStreamBase like IAvtpMediaStream
++{
++    parameters:
++        @class(Iec61883TsTalker);
++        double bitrate @unit(bps) = default(16Mbps);
++        double pduInterval @unit(s) = default(250us);
++        int maxSourcePacketsPerPdu = default(7);
++        int psiIntervalPackets = default(1000);  // PAT/PMT repetition (about 94 ms at 16 Mbps)
++        int pcrIntervalPackets = default(397);   // PCR repetition (about 37 ms at 16 Mbps; not a multiple of 300 ticks)
++        int audioEveryPackets = default(10);
++        maxTransitTime = default(50ms);
++}
++
++// IEC 61883-4 listener: outputs every TS packet at its source packet presentation
++// time; checks CIP DBC, TS sync, continuity counters, PAT/PMT CRC, payload, and
++// measures PCR jitter and the recovered 27 MHz system clock.
++simple Iec61883TsListener extends AvtpMediaStreamBase like IAvtpMediaStream
++{
++    parameters:
++        @class(Iec61883TsListener);
++        @signal[tsPacketOutput](type=long);
++        @statistic[tsPacketOutput](record=count);
++}
++
++//
++// CRF talker (subtype 0x04): every timestampInterval media clock events one 64-bit
++// gPTP timestamp (event time + timestampOffset), timestampsPerPdu per PDU. A PDU is
++// sent at its first event (the talker is the clock source and predicts the others).
++// Audio sample clock 48 kHz: interval 160, 6 timestamps per PDU (50 PDUs/s).
++//
++simple CrfTalker extends AvtpMediaStreamBase like IAvtpMediaStream
++{
++    parameters:
++        @class(CrfTalker);
++        int crfType = default(1);                // 1 = audio sample
++        int baseFrequency @unit(Hz) = default(48000Hz);
++        int pull = default(0);                   // 0 = x1
++        int timestampInterval = default(160);
++        int timestampsPerPdu = default(6);
++        double timestampOffset @unit(s) = default(-1s);   // -1 = maxTransitTime
++}
++
++// CRF listener: recovers the media clock frequency and timestamp jitter.
++simple CrfListener extends AvtpMediaStreamBase like IAvtpMediaStream
++{
++    parameters:
++        @class(CrfListener);
++        @signal[crfTimestampSlack](type=simtime_t);
++        @statistic[crfTimestampSlack](record=stats);     // timestamp - reception time
++}
++
++//
++// Application for an INET host (StandardHost or TsnDevice): any number of media
++// talkers and listeners sharing one AVTP (EtherType 0x22F0) registration.
++//
++module AvtpMediaEndpoint like IApp
++{
++    parameters:
++        string interfaceTableModule;
++        string clockModule = default("");       // relative to this module, e.g. "^.clock"
++        int numTalkers = default(0);
++        int numListeners = default(0);
++        @display("i=block/app");
++    gates:
++        input socketIn;
++        output socketOut;
++    submodules:
++        mux: AvtpStreamMux {
++            @display("p=200,100");
++        }
++        talker[numTalkers]: <> like IAvtpMediaStream {
++            interfaceTableModule = default(absPath(parent.interfaceTableModule));
++            clockModule = default(parent.clockModule == "" ? "" : "^." + parent.clockModule);
++            @display("p=100,200,row,100");
++        }
++        listener[numListeners]: <> like IAvtpMediaStream {
++            interfaceTableModule = default(absPath(parent.interfaceTableModule));
++            clockModule = default(parent.clockModule == "" ? "" : "^." + parent.clockModule);
++            @display("p=100,300,row,100");
++        }
++    connections allowunconnected:
++        socketIn --> mux.socketIn;
++        mux.socketOut --> socketOut;
++        for i=0..numTalkers-1 {
++            talker[i].out --> mux.talkerIn++;
++        }
++        for i=0..numListeners-1 {
++            mux.listenerOut++ --> listener[i].in;
++        }
++}
++
++// Deterministic codec checks: golden byte vectors, serializer round trips, rejection
++// of malformed PDUs, MPEG-2 TS / PCR / CRC helpers and the PCM test pattern.
++simple AvtpMediaSelfTest extends SimpleModule
++{
++    parameters:
++        @class(AvtpMediaSelfTest);
++}
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaApps.cc b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaApps.cc
+new file mode 100644
+index 0000000..696a46d
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaApps.cc
+@@ -0,0 +1,934 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// IEEE 1722 media streams for digital radio / TV transport: AAF PCM audio,
++// IEC 61883-4 MPEG-2 TS and CRF media clock reference. Talkers generate synthetic,
++// verifiable content on a media clock (nominal rate x (1 + mediaClockPpm) in the
++// talker's gPTP time); listeners decode the received bytes with the validating
++// decoder, release data at the presentation time on their own gPTP clock and
++// verify content, continuity and clock recovery.
++//
++// AvtpStreamMux registers EtherType 0x22F0 once per node (INET allows one
++// registration per protocol) and connects any number of talkers and listeners.
++#include <cmath>
++#include <deque>
++#include <memory>
++#include <map>
++#include <string>
++#include <vector>
++
++#include "inet/applications/base/ApplicationBase.h"
++#include "inet/common/IProtocolRegistrationListener.h"
++#include "inet/common/ModuleAccess.h"
++#include "inet/common/Protocol.h"
++#include "inet/common/ProtocolTag_m.h"
++#include "inet/common/clock/ClockUserModuleMixin.h"
++#include "inet/common/packet/Packet.h"
++#include "inet/common/packet/chunk/BytesChunk.h"
++#include "inet/linklayer/common/InterfaceTag_m.h"
++#include "inet/linklayer/common/MacAddressTag_m.h"
++#include "inet/networklayer/common/NetworkInterface.h"
++#include "inet/networklayer/contract/IInterfaceTable.h"
++#include "signalsandgateways/inet4/avtp/media/AvtpMedia_m.h"
++#include "signalsandgateways/inet4/avtp/media/AvtpMediaCodec.h"
++
++using namespace omnetpp;
++using namespace inet;
++
++namespace SignalsAndGateways {
++
++using namespace avtp::media;
++
++// ---- mux -------------------------------------------------------------------------
++
++class AvtpStreamMux : public cSimpleModule
++{
++    long forwarded = 0, delivered = 0;
++
++  protected:
++    virtual int numInitStages() const override { return NUM_INIT_STAGES; }
++
++    virtual void initialize(int stage) override
++    {
++        if (stage == INITSTAGE_LINK_LAYER)
++            registerProtocol(Protocol::tsn, gate("socketOut"), gate("socketIn"));
++    }
++
++    virtual void handleMessage(cMessage *message) override
++    {
++        if (message->arrivedOn("talkerIn")) {
++            ++forwarded;
++            send(message, "socketOut");
++            return;
++        }
++        // Every listener filters by destination address and stream ID itself.
++        auto packet = check_and_cast<Packet *>(message);
++        const int listeners = gateSize("listenerOut");
++        for (int i = 0; i < listeners; ++i)
++            send(i + 1 == listeners ? packet : packet->dup(), "listenerOut", i);
++        delivered += listeners;
++        if (listeners == 0)
++            delete packet;
++    }
++
++    virtual void finish() override
++    {
++        recordScalar("talkerPdusForwarded", forwarded);
++        recordScalar("listenerDeliveries", delivered);
++    }
++};
++
++Define_Module(AvtpStreamMux);
++
++// ---- common stream base ---------------------------------------------------------
++
++class AvtpMediaStreamBase : public ClockUserModuleMixin<ApplicationBase>
++{
++  protected:
++    NetworkInterface *networkInterface = nullptr;
++    MacAddress destAddress, listenAddress;
++    uint64_t streamId = 0;
++    bool hasListenStreamId = false;
++    uint64_t listenStreamId = 0;
++    simtime_t maxTransitTime, processingDelay, startTime, stopTime;
++    bool dropLate = false;
++    double mediaClockPpm = 0;
++    clocktime_t mediaStart;
++    uint8_t sequenceNum = 0;
++    bool haveSequence = false;
++    uint8_t expectedSequence = 0;
++    cMessage *timer = nullptr;
++
++    long pdusSent = 0, pdusReceived = 0, sequenceLost = 0, sequenceOutOfOrder = 0;
++    long droppedMalformed = 0, droppedStreamId = 0, droppedSubtype = 0, ignoredOtherDestinations = 0;
++    long latePresentations = 0, droppedLate = 0;
++    simsignal_t slackSignal, latenessSignal, presentationErrorSignal, pduLengthSignal;
++
++    virtual int numInitStages() const override { return NUM_INIT_STAGES; }
++    virtual uint8_t expectedSubtype() const = 0;
++    virtual void startStreaming() {}
++
++    static uint64_t parseStreamId(const char *text)
++    {
++        try {
++            size_t used = 0;
++            const std::string value(text);
++            const uint64_t id = std::stoull(value, &used, 0);
++            if (used != value.size())
++                throw cRuntimeError("trailing characters");
++            return id;
++        }
++        catch (const std::exception&) {
++            throw cRuntimeError("Invalid stream ID '%s'; use e.g. \"0x0200000000010001\"", text);
++        }
++    }
++
++    virtual void initialize(int stage) override
++    {
++        ClockUserModuleMixin::initialize(stage);
++        if (stage == INITSTAGE_LOCAL) {
++            if (*par("destAddress").stringValue())
++                destAddress = MacAddress(par("destAddress").stringValue());
++            if (*par("listenAddress").stringValue())
++                listenAddress = MacAddress(par("listenAddress").stringValue());
++            const char *listenStream = par("listenStreamId");
++            hasListenStreamId = *listenStream != '\0';
++            if (hasListenStreamId)
++                listenStreamId = parseStreamId(listenStream);
++            maxTransitTime = par("maxTransitTime");
++            processingDelay = par("processingDelay");
++            startTime = par("startTime");
++            stopTime = par("stopTime");
++            mediaClockPpm = par("mediaClockPpm");
++            const std::string latePolicy = par("latePresentationPolicy").stdstringValue();
++            if (latePolicy != "play" && latePolicy != "drop")
++                throw cRuntimeError("latePresentationPolicy must be \"play\" or \"drop\"");
++            dropLate = latePolicy == "drop";
++            if (maxTransitTime < 0 || processingDelay < 0 || startTime < 0)
++                throw cRuntimeError("maxTransitTime, processingDelay and startTime must be nonnegative");
++            timer = new cMessage("mediaTimer");
++            slackSignal = registerSignal("presentationSlack");
++            latenessSignal = registerSignal("presentationLateness");
++            presentationErrorSignal = registerSignal("presentationError");
++            pduLengthSignal = registerSignal("avtpPduLength");
++        }
++    }
++
++    virtual void handleStartOperation(LifecycleOperation *operation) override
++    {
++        auto interfaceTable = getModuleFromPar<IInterfaceTable>(par("interfaceTableModule"), this);
++        networkInterface = interfaceTable->findInterfaceByName(par("interface"));
++        if (networkInterface == nullptr)
++            throw cRuntimeError("Cannot find network interface '%s'", par("interface").stringValue());
++        const char *configuredStream = par("streamId");
++        const int uniqueId = par("streamUniqueId");
++        if (uniqueId < 0 || uniqueId > 0xffff)
++            throw cRuntimeError("streamUniqueId must be 0..65535");
++        streamId = *configuredStream != '\0' ? parseStreamId(configuredStream)
++                : (networkInterface->getMacAddress().getInt() << 16) | uint64_t(uniqueId);
++        if (listenAddress.isMulticast())
++            networkInterface->addMulticastMacAddress(listenAddress);
++        if (!destAddress.isUnspecified())
++            scheduleAt(std::max(simTime(), startTime), timer);
++    }
++
++    virtual void handleStopOperation(LifecycleOperation *operation) override { cancelEvent(timer); }
++    virtual void handleCrashOperation(LifecycleOperation *operation) override { cancelEvent(timer); }
++
++    virtual void handleMessageWhenUp(cMessage *message) override
++    {
++        if (message == timer) {
++            if (mediaStart == CLOCKTIME_ZERO && pdusSent == 0) {
++                // Media clock epoch on a whole microsecond of the talker's gPTP clock.
++                const int64_t now = getClockTime().inUnit(SIMTIME_US) + 1;
++                mediaStart = ClockTime(now, SIMTIME_US);
++                startStreaming();
++            }
++            else
++                onTimer();
++        }
++        else if (message->isSelfMessage())
++            onPresentation(message);
++        else
++            handleListenedPacket(check_and_cast<Packet *>(message));
++    }
++
++    virtual void onTimer() {}
++    virtual void onPresentation(cMessage *message) { delete message; }
++    virtual void onPdu(const DecodedMediaPdu& pdu, Packet *packet) = 0;
++
++    // Nanoseconds after mediaStart (gPTP) of a media event 'seconds' of media time
++    // later: the media clock runs at (1 + mediaClockPpm) of the gPTP rate.
++    int64_t mediaOffsetNs(double seconds) const { return std::llround(seconds * 1e9 / (1 + mediaClockPpm * 1e-6)); }
++    clocktime_t mediaClock(double seconds) const { return mediaStart + ClockTime(mediaOffsetNs(seconds), SIMTIME_NS); }
++
++    // Simulation time of a clock instant; INET only converts future instants, a past
++    // one is extrapolated back from now (the clock rate error is negligible here).
++    simtime_t simTimeOf(clocktime_t when) const
++    {
++        const clocktime_t now = getClockTime();
++        return when >= now ? computeSimTimeFromClockTime(when) : simTime() - (now - when).asSimTime();
++    }
++
++    // Schedules the timer at a gPTP instant (never in the past).
++    void scheduleTimerAt(clocktime_t when)
++    {
++        simtime_t at = simTimeOf(when);
++        if (at < simTime())
++            at = simTime();
++        if (stopTime < SIMTIME_ZERO || at <= stopTime)
++            scheduleAt(at, timer);
++    }
++
++    static uint32_t low32(clocktime_t time) { return uint32_t(time.inUnit(SIMTIME_NS)); }
++
++    void sendPdu(Packet *packet)
++    {
++        packet->addTag<PacketProtocolTag>()->setProtocol(&Protocol::tsn);
++        packet->addTag<MacAddressReq>()->setDestAddress(destAddress);
++        packet->addTag<InterfaceReq>()->setInterfaceId(networkInterface->getInterfaceId());
++        packet->addTag<DispatchProtocolReq>()->setProtocol(networkInterface->getProtocol() ? networkInterface->getProtocol() : &Protocol::ethernetMac);
++        emit(pduLengthSignal, packet->getByteLength());
++        ++pdusSent;
++        ++sequenceNum;
++        send(packet, "out");
++    }
++
++    void tagOrigin(Packet *packet, b offset, b length, clocktime_t capture, clocktime_t presentation)
++    {
++        auto tag = packet->addRegionTag<AvtpMediaOriginTag>(offset, length);
++        tag->setSourceTime(simTimeOf(capture));
++        tag->setIntendedPresentationTime(simTimeOf(presentation));
++    }
++
++    // Intended presentation instants of the tagged regions, by byte offset in the PDU.
++    static std::map<size_t, simtime_t> intendedTimes(Packet *packet)
++    {
++        std::map<size_t, simtime_t> times;
++        const b front = packet->getFrontOffset();
++        for (const auto& region : packet->getAllRegionTags<AvtpMediaOriginTag>())
++            if (region.getOffset() >= front)
++                times[B(region.getOffset() - front).get()] = region.getTag()->getIntendedPresentationTime();
++        return times;
++    }
++
++    void handleListenedPacket(Packet *packet)
++    {
++        const auto& protocolTag = packet->findTag<PacketProtocolTag>();
++        const auto& macAddressInd = packet->findTag<MacAddressInd>();
++        if (listenAddress.isUnspecified() || protocolTag == nullptr || protocolTag->getProtocol() != &Protocol::tsn
++                || macAddressInd == nullptr || macAddressInd->getDestAddress() != listenAddress) {
++            ++ignoredOtherDestinations;
++            delete packet;
++            return;
++        }
++        ++pdusReceived;
++        const DecodedMediaPdu pdu = decodeMediaPdu(packet->peekDataAsBytes()->getBytes());
++        if (pdu.error != MediaError::NONE) {
++            EV_WARN << "Dropping malformed AVTPDU: " << toString(pdu.error) << endl;
++            ++droppedMalformed;
++        }
++        else if (pdu.subtype != expectedSubtype())
++            ++droppedSubtype;
++        else if (hasListenStreamId && pdu.streamId != listenStreamId)
++            ++droppedStreamId;
++        else {
++            if (haveSequence) {
++                const uint8_t delta = pdu.sequenceNum - expectedSequence;
++                if (delta != 0 && delta < 128)
++                    sequenceLost += delta;
++                else if (delta >= 128)
++                    ++sequenceOutOfOrder;
++            }
++            haveSequence = true;
++            expectedSequence = pdu.sequenceNum + 1;
++            onPdu(pdu, packet);
++        }
++        delete packet;
++    }
++
++    // avtp_timestamp (gPTP ns mod 2^32) as the instant nearest to now on this clock.
++    clocktime_t reconstructTimestamp(uint32_t timestamp) const
++    {
++        const int64_t now = getClockTime().inUnit(SIMTIME_NS);
++        return ClockTime(now + int32_t(timestamp - uint32_t(now)), SIMTIME_NS);
++    }
++
++    // Simulation time at which data with this presentation time is released, or -1
++    // if it arrived too late and the policy drops it.
++    simtime_t releaseTime(uint32_t timestamp, simtime_t intended)
++    {
++        const clocktime_t ready = getClockTime() + ClockTime::from(processingDelay);
++        const clocktime_t presentation = reconstructTimestamp(timestamp);
++        if (presentation >= ready) {
++            emit(slackSignal, (presentation - ready).asSimTime());
++            const simtime_t release = computeSimTimeFromClockTime(presentation);
++            if (intended >= SIMTIME_ZERO)
++                emit(presentationErrorSignal, release - intended);
++            return release;
++        }
++        ++latePresentations;
++        emit(latenessSignal, (ready - presentation).asSimTime());
++        if (dropLate) {
++            ++droppedLate;
++            return -1;
++        }
++        return simTime() + processingDelay;
++    }
++
++    virtual void finish() override
++    {
++        recordScalar("avtpPdusSent", pdusSent);
++        recordScalar("avtpPdusReceived", pdusReceived);
++        recordScalar("sequenceLost", sequenceLost);
++        recordScalar("sequenceOutOfOrder", sequenceOutOfOrder);
++        recordScalar("droppedMalformedPdus", droppedMalformed);
++        recordScalar("droppedStreamId", droppedStreamId);
++        recordScalar("droppedSubtype", droppedSubtype);
++        recordScalar("ignoredOtherDestinations", ignoredOtherDestinations);
++        recordScalar("latePresentations", latePresentations);
++        recordScalar("droppedLate", droppedLate);
++        ApplicationBase::finish();
++    }
++
++  public:
++    virtual ~AvtpMediaStreamBase() { cancelAndDelete(timer); }
++};
++
++// Least-squares fit y = a + b x; reports slope and the largest residual.
++struct LinearFit {
++    std::vector<double> xs, ys;
++    void add(double x, double y) { xs.push_back(x); ys.push_back(y); }
++    bool valid() const { return xs.size() >= 3; }
++    void solve(double& slope, double& maxResidual) const
++    {
++        const double n = xs.size();
++        double mx = 0, my = 0;
++        for (size_t i = 0; i < xs.size(); ++i) { mx += xs[i]; my += ys[i]; }
++        mx /= n; my /= n;
++        double sxx = 0, sxy = 0;
++        for (size_t i = 0; i < xs.size(); ++i) { sxx += (xs[i] - mx) * (xs[i] - mx); sxy += (xs[i] - mx) * (ys[i] - my); }
++        slope = sxy / sxx;
++        maxResidual = 0;
++        for (size_t i = 0; i < xs.size(); ++i)
++            maxResidual = std::max(maxResidual, std::fabs(ys[i] - (my + slope * (xs[i] - mx))));
++    }
++};
++
++// Rate in ppm against 'nominal' units per second from a fit of simulation time (ns)
++// over media units: the physical rate, independent of any node clock.
++static void recordPhysicalRate(cComponent *owner, const char *name, const LinearFit& fit, double nominal)
++{
++    if (!fit.valid())
++        return;
++    double slope, residual;
++    fit.solve(slope, residual);
++    owner->recordScalar(name, (1e9 / slope / nominal - 1) * 1e6);
++}
++
++// ---- AAF PCM audio --------------------------------------------------------------
++
++class AafTalker : public AvtpMediaStreamBase
++{
++    uint8_t format = AAF_INT_16BIT, nsr = 0;
++    size_t container = 2;
++    unsigned bitDepth = 16, channels = 2, samplesPerPdu = 6;
++    uint32_t sampleRate = 48000, step = 331;
++    uint64_t pduIndex = 0;
++    LinearFit production;   // sample index -> simulation time of capture
++
++  protected:
++    virtual uint8_t expectedSubtype() const override { return AVTP_SUBTYPE_AAF; }
++
++    virtual void initialize(int stage) override
++    {
++        AvtpMediaStreamBase::initialize(stage);
++        if (stage == INITSTAGE_LOCAL) {
++            const std::string name = par("format").stdstringValue();
++            format = name == "int16" ? AAF_INT_16BIT : name == "int24" ? AAF_INT_24BIT : name == "int32" ? AAF_INT_32BIT : 0;
++            if (format == 0)
++                throw cRuntimeError("format must be int16, int24 or int32");
++            container = aafContainerBytes(format);
++            const int depth = par("bitDepth");
++            bitDepth = depth < 0 ? 8 * container : depth;
++            sampleRate = par("sampleRate");
++            nsr = hzToNsr(sampleRate);
++            channels = par("channels");
++            samplesPerPdu = par("samplesPerPdu");
++            step = par("patternStep");
++            if (bitDepth < 1 || bitDepth > 8 * container || nsr == 0 || channels < 1 || channels > 1023
++                    || samplesPerPdu < 1 || step % 2 == 0)
++                throw cRuntimeError("invalid AAF talker parameters (bit depth, nominal sample rate, channels, samples per PDU, odd pattern step)");
++            if (AVTP_AAF_HEADER_BYTES + samplesPerPdu * channels * container > 1500)
++                throw cRuntimeError("AAF PDU exceeds a 1500-byte Ethernet payload");
++        }
++    }
++
++    double sampleTime(uint64_t n) const { return double(n) / sampleRate; }
++
++    virtual void startStreaming() override
++    {
++        // PDU k is sent once its last sample is captured.
++        scheduleTimerAt(mediaClock(sampleTime(samplesPerPdu)) + ClockTime::from(processingDelay));
++    }
++
++    virtual void onTimer() override
++    {
++        const uint64_t first = pduIndex * samplesPerPdu;
++        const clocktime_t capture = mediaClock(sampleTime(first));
++        const clocktime_t presentation = capture + ClockTime::from(maxTransitTime);
++        Bytes samples;
++        for (uint64_t n = first; n < first + samplesPerPdu; ++n)
++            for (unsigned c = 0; c < channels; ++c)
++                putPcmSample(samples, pcmPatternSample(n, c, bitDepth, step), container, bitDepth);
++        auto header = makeShared<AvtpAafPcmHeader>();
++        header->setSequenceNum(sequenceNum);
++        header->setStreamId(streamId);
++        header->setAvtpTimestamp(low32(presentation));
++        header->setFormat(format);
++        header->setNsr(nsr);
++        header->setChannelsPerFrame(channels);
++        header->setBitDepth(bitDepth);
++        header->setStreamDataLength(samples.size());
++        auto packet = new Packet("AVTP-AAF");
++        packet->insertAtBack(header);
++        packet->insertAtBack(makeShared<BytesChunk>(samples));
++        tagOrigin(packet, B(AVTP_AAF_HEADER_BYTES), B(samples.size()), capture, presentation);
++        production.add(double(first), simTimeOf(capture).inUnit(SIMTIME_NS));
++        sendPdu(packet);
++        ++pduIndex;
++        scheduleTimerAt(mediaClock(sampleTime((pduIndex + 1) * samplesPerPdu)) + ClockTime::from(processingDelay));
++    }
++
++    virtual void onPdu(const DecodedMediaPdu&, Packet *) override {}
++
++    virtual void finish() override
++    {
++        AvtpMediaStreamBase::finish();
++        recordPhysicalRate(this, "productionRatePpm", production, sampleRate);
++    }
++};
++
++Define_Module(AafTalker);
++
++class AafListener : public AvtpMediaStreamBase
++{
++    struct Playout {
++        Bytes samples;
++        uint8_t format, bitDepth;
++        uint16_t channels;
++        int64_t presentationNs;
++    };
++    uint32_t step = 331;
++    bool haveFormat = false, haveIndex = false;
++    uint8_t format = 0, nsr = 0, bitDepth = 0;
++    uint16_t channels = 0;
++    uint64_t nextIndex = 0, unwrappedBase = 0, lastRaw = 0;
++    long samplesPlayed = 0, sampleErrors = 0, sampleGaps = 0, formatChanges = 0, timestampInvalid = 0;
++    LinearFit fit, playoutFit;   // sample index -> presentation time (listener clock) / simulation time
++    simsignal_t playedSignal;
++
++  protected:
++    virtual uint8_t expectedSubtype() const override { return AVTP_SUBTYPE_AAF; }
++
++    virtual void initialize(int stage) override
++    {
++        AvtpMediaStreamBase::initialize(stage);
++        if (stage == INITSTAGE_LOCAL) {
++            step = par("patternStep");
++            playedSignal = registerSignal("samplesPlayed");
++        }
++    }
++
++    virtual void onPdu(const DecodedMediaPdu& pdu, Packet *packet) override
++    {
++        if (!pdu.tv) {
++            ++timestampInvalid;
++            return;
++        }
++        if (haveFormat && (pdu.format != format || pdu.channelsPerFrame != channels || pdu.bitDepth != bitDepth || pdu.nsr != nsr))
++            ++formatChanges;
++        haveFormat = true;
++        format = pdu.format;
++        channels = pdu.channelsPerFrame;
++        bitDepth = pdu.bitDepth;
++        nsr = pdu.nsr;
++        const auto intended = intendedTimes(packet);
++        const simtime_t release = releaseTime(pdu.avtpTimestamp, intended.empty() ? -1 : intended.begin()->second);
++        if (release < SIMTIME_ZERO)
++            return;
++        auto playout = new Playout{pdu.samples, pdu.format, pdu.bitDepth, pdu.channelsPerFrame,
++                                   reconstructTimestamp(pdu.avtpTimestamp).inUnit(SIMTIME_NS)};
++        auto message = new cMessage("aafPlayout");
++        message->setContextPointer(playout);
++        scheduleAt(release, message);
++    }
++
++    virtual void onPresentation(cMessage *message) override
++    {
++        auto playout = static_cast<Playout *>(message->getContextPointer());
++        delete message;
++        const size_t container = aafContainerBytes(playout->format);
++        const size_t frames = playout->samples.size() / (container * playout->channels);
++        const unsigned depth = playout->bitDepth;
++        const uint64_t modulus = 1ull << depth;
++        if (frames > 0) {
++            const uint64_t raw = pcmPatternIndex(getPcmSample(playout->samples.data(), container, depth), depth, step);
++            // Unwrap the pattern index (mod 2^bitDepth) into a running sample count.
++            if (haveIndex) {
++                if (raw != nextIndex % modulus) {
++                    const uint64_t gap = (raw + modulus - nextIndex % modulus) % modulus;
++                    if (gap < modulus / 2)
++                        sampleGaps += gap;
++                }
++                unwrappedBase += (raw + modulus - lastRaw) % modulus;
++            }
++            else
++                unwrappedBase = raw;
++            haveIndex = true;
++            lastRaw = raw;
++            for (size_t f = 0; f < frames; ++f)
++                for (unsigned c = 0; c < playout->channels; ++c) {
++                    const uint8_t *s = playout->samples.data() + (f * playout->channels + c) * container;
++                    if (getPcmSample(s, container, depth) != pcmPatternSample(raw + f, c, depth, step))
++                        ++sampleErrors;
++                }
++            nextIndex = raw + frames;
++            fit.add(double(unwrappedBase), double(playout->presentationNs));
++            playoutFit.add(double(unwrappedBase), simTime().inUnit(SIMTIME_NS));
++            samplesPlayed += frames;
++            emit(playedSignal, long(frames));
++        }
++        delete playout;
++    }
++
++    virtual void finish() override
++    {
++        AvtpMediaStreamBase::finish();
++        recordScalar("samplesPlayed", samplesPlayed);
++        recordScalar("sampleErrors", sampleErrors);
++        recordScalar("sampleGaps", sampleGaps);
++        recordScalar("formatChanges", formatChanges);
++        recordScalar("timestampInvalid", timestampInvalid);
++        if (fit.valid() && nsrToHz(nsr) > 0) {
++            double slope, residual;
++            fit.solve(slope, residual);   // ns per sample on the listener's gPTP clock
++            recordScalar("recoveredSampleRate", 1e9 / slope);
++            recordScalar("recoveredRatePpm", (1e9 / slope / nsrToHz(nsr) - 1) * 1e6);
++            recordScalar("timestampJitterMax", residual * 1e-9, "s");
++            recordPhysicalRate(this, "playoutRatePpm", playoutFit, nsrToHz(nsr));
++        }
++    }
++};
++
++Define_Module(AafListener);
++
++// ---- IEC 61883-4 MPEG-2 transport stream -------------------------------------------
++
++class Iec61883TsTalker : public AvtpMediaStreamBase
++{
++    double bitrate = 16e6;
++    simtime_t pduInterval;
++    int maxSourcePackets = 7;
++    uint64_t packetIndex = 0, tick = 0;
++    uint8_t dbc = 0;
++    long backlogTicks = 0;
++    std::unique_ptr<TsGenerator> generator;
++    LinearFit production;   // PCR (27 MHz ticks) -> simulation time of capture
++
++  protected:
++    virtual uint8_t expectedSubtype() const override { return AVTP_SUBTYPE_61883_IIDC; }
++
++    virtual void initialize(int stage) override
++    {
++        AvtpMediaStreamBase::initialize(stage);
++        if (stage == INITSTAGE_LOCAL) {
++            bitrate = par("bitrate").doubleValue();
++            pduInterval = par("pduInterval");
++            maxSourcePackets = par("maxSourcePacketsPerPdu");
++            TsGeneratorConfig config;
++            config.psiIntervalPackets = par("psiIntervalPackets");
++            config.pcrIntervalPackets = par("pcrIntervalPackets");
++            config.audioEveryPackets = par("audioEveryPackets");
++            if (bitrate <= 0 || pduInterval <= 0 || maxSourcePackets < 1
++                    || AVTP_61883_HEADER_BYTES + AVTP_CIP_HEADER_BYTES + maxSourcePackets * IEC61883_4_SOURCE_PACKET_BYTES > 1500
++                    || config.psiIntervalPackets < 3 || config.pcrIntervalPackets < 3 || config.audioEveryPackets < 2)
++                throw cRuntimeError("invalid 61883-4 talker parameters (bitrate, pduInterval, maxSourcePacketsPerPdu <= 7, intervals)");
++            generator = std::make_unique<TsGenerator>(config);
++        }
++    }
++
++    // Media time of TS packet i at the nominal transport rate.
++    double packetTime(uint64_t i) const { return i * MPEG_TS_PACKET_BYTES * 8 / bitrate; }
++    // PCR in 27 MHz ticks of the (media) system clock, exact for integer bit rates.
++    uint64_t pcr27(uint64_t i) const { return i * MPEG_TS_PACKET_BYTES * 8 * 27000000ull / uint64_t(bitrate); }
++
++    virtual void startStreaming() override { scheduleTimerAt(mediaStart + ClockTime::from(pduInterval)); }
++
++    virtual void onTimer() override
++    {
++        ++tick;
++        const clocktime_t now = mediaStart + ClockTime::from(pduInterval * int64_t(tick));
++        std::vector<Bytes> sourcePackets;
++        std::vector<std::pair<clocktime_t, clocktime_t>> times;
++        while ((int)sourcePackets.size() < maxSourcePackets && mediaClock(packetTime(packetIndex)) <= now) {
++            const clocktime_t capture = mediaClock(packetTime(packetIndex));
++            const clocktime_t presentation = capture + ClockTime::from(maxTransitTime);
++            Bytes sp;
++            const uint32_t sph = low32(presentation);
++            for (int shift = 24; shift >= 0; shift -= 8)
++                sp.push_back(uint8_t(sph >> shift));
++            const Bytes ts = generator->packet(packetIndex, pcr27(packetIndex));
++            sp.insert(sp.end(), ts.begin(), ts.end());
++            sourcePackets.push_back(sp);
++            times.push_back({capture, presentation});
++            if (packetIndex % 100 == 0)
++                production.add(double(pcr27(packetIndex)), simTimeOf(capture).inUnit(SIMTIME_NS));
++            ++packetIndex;
++        }
++        if (mediaClock(packetTime(packetIndex)) <= now)
++            ++backlogTicks;     // more packets due than one PDU carries
++        if (!sourcePackets.empty()) {
++            auto header = makeShared<Avtp61883Header>();
++            header->setSequenceNum(sequenceNum);
++            header->setStreamId(streamId);
++            header->setAvtpTimestamp(low32(times.front().second));
++            header->setStreamDataLength(AVTP_CIP_HEADER_BYTES + sourcePackets.size() * IEC61883_4_SOURCE_PACKET_BYTES);
++            header->setDbc(dbc);
++            dbc += 8 * sourcePackets.size();    // 8 data blocks of 24 bytes per source packet
++            auto packet = new Packet("AVTP-61883-4-TS");
++            packet->insertAtBack(header);
++            for (size_t i = 0; i < sourcePackets.size(); ++i) {
++                const b offset = packet->getTotalLength();
++                packet->insertAtBack(makeShared<BytesChunk>(sourcePackets[i]));
++                tagOrigin(packet, offset, B(IEC61883_4_SOURCE_PACKET_BYTES), times[i].first, times[i].second);
++            }
++            sendPdu(packet);
++        }
++        scheduleTimerAt(mediaStart + ClockTime::from(pduInterval * int64_t(tick + 1)));
++    }
++
++    virtual void onPdu(const DecodedMediaPdu&, Packet *) override {}
++
++    virtual void finish() override
++    {
++        AvtpMediaStreamBase::finish();
++        recordScalar("tsPacketsSent", packetIndex);
++        recordScalar("backlogTicks", backlogTicks);
++        recordPhysicalRate(this, "productionSystemClockPpm", production, 27e6);
++    }
++};
++
++Define_Module(Iec61883TsTalker);
++
++class Iec61883TsListener : public AvtpMediaStreamBase
++{
++    struct Output {
++        Bytes ts;
++        int64_t presentationNs;
++    };
++    TsGeneratorConfig config;
++    bool haveDbc = false;
++    uint8_t expectedDbc = 0;
++    std::map<uint16_t, uint8_t> lastCc;
++    long tsPackets = 0, syncErrors = 0, ccErrors = 0, psiCrcErrors = 0, patCount = 0, pmtCount = 0;
++    long payloadErrors = 0, payloadMissing = 0, dbcErrors = 0, pcrCount = 0, unknownPid = 0;
++    LinearFit pcrFit, outputFit;   // PCR against the listener clock / simulation time at output
++    simsignal_t tsSignal;
++
++  protected:
++    virtual uint8_t expectedSubtype() const override { return AVTP_SUBTYPE_61883_IIDC; }
++
++    virtual void initialize(int stage) override
++    {
++        AvtpMediaStreamBase::initialize(stage);
++        if (stage == INITSTAGE_LOCAL)
++            tsSignal = registerSignal("tsPacketOutput");
++    }
++
++    virtual void onPdu(const DecodedMediaPdu& pdu, Packet *packet) override
++    {
++        if (haveDbc && pdu.dbc != expectedDbc)
++            ++dbcErrors;
++        haveDbc = true;
++        expectedDbc = pdu.dbc + 8 * pdu.sourcePackets.size();
++        const auto intended = intendedTimes(packet);
++        for (size_t i = 0; i < pdu.sourcePackets.size(); ++i) {
++            const auto& sp = pdu.sourcePackets[i];
++            const auto it = intended.find(AVTP_61883_HEADER_BYTES + AVTP_CIP_HEADER_BYTES + i * IEC61883_4_SOURCE_PACKET_BYTES);
++            const simtime_t release = releaseTime(sp.timestamp, it != intended.end() ? it->second : simtime_t(-1));
++            if (release < SIMTIME_ZERO)
++                continue;
++            auto message = new cMessage("tsOutput");
++            message->setContextPointer(new Output{sp.tsPacket, reconstructTimestamp(sp.timestamp).inUnit(SIMTIME_NS)});
++            scheduleAt(release, message);
++        }
++    }
++
++    void count(TsPayloadCheck result)
++    {
++        switch (result) {
++            case TsPayloadCheck::OK: break;
++            case TsPayloadCheck::PAYLOAD_MISSING: ++payloadMissing; break;
++            case TsPayloadCheck::PSI_INVALID: ++psiCrcErrors; break;
++            case TsPayloadCheck::MISMATCH: ++payloadErrors; break;
++        }
++    }
++
++    virtual void onPresentation(cMessage *message) override
++    {
++        auto output = static_cast<Output *>(message->getContextPointer());
++        delete message;
++        const Bytes& ts = output->ts;
++        const TsPacketInfo info = parseTsPacket(ts.data());
++        ++tsPackets;
++        emit(tsSignal, long(info.pid));
++        if (!info.syncOk || info.tei) {
++            ++syncErrors;
++            delete output;
++            return;
++        }
++        if (info.adaptationFieldControl & 1) {
++            auto it = lastCc.find(info.pid);
++            if (it != lastCc.end() && info.continuityCounter != ((it->second + 1) & 0x0f) && !info.discontinuity)
++                ++ccErrors;
++            lastCc[info.pid] = info.continuityCounter;
++        }
++        if (info.hasPcr && info.pid == config.videoPid) {
++            ++pcrCount;
++            pcrFit.add(double(output->presentationNs), double(info.pcr27));
++            outputFit.add(double(info.pcr27), simTime().inUnit(SIMTIME_NS));
++        }
++        if (info.pid == 0x0000 || info.pid == config.pmtPid) {
++            (info.pid == 0 ? patCount : pmtCount)++;
++            const Bytes expected = info.pid == 0 ? TsGenerator::patSection(config) : TsGenerator::pmtSection(config);
++            count(checkTsPsiPacket(ts, info, expected));
++        }
++        else if (info.pid == config.videoPid || info.pid == config.audioPid)
++            count(checkTsEsPacket(ts, info));
++        else
++            ++unknownPid;
++        delete output;
++    }
++
++    virtual void finish() override
++    {
++        AvtpMediaStreamBase::finish();
++        recordScalar("tsPacketsOutput", tsPackets);
++        recordScalar("syncErrors", syncErrors);
++        recordScalar("continuityErrors", ccErrors);
++        recordScalar("psiCrcErrors", psiCrcErrors);
++        recordScalar("patReceived", patCount);
++        recordScalar("pmtReceived", pmtCount);
++        recordScalar("payloadErrors", payloadErrors);
++        recordScalar("payloadMissing", payloadMissing);
++        recordScalar("unknownPid", unknownPid);
++        recordScalar("dbcErrors", dbcErrors);
++        recordScalar("pcrReceived", pcrCount);
++        if (pcrFit.valid()) {
++            // PCR ticks per ns of the listener clock -> recovered 27 MHz rate; jitter
++            // is the largest PCR deviation from the fitted line (PCR accuracy).
++            double slope, residual;
++            pcrFit.solve(slope, residual);
++            recordScalar("recoveredSystemClockPpm", (slope * 1e9 / 27e6 - 1) * 1e6);
++            recordScalar("pcrJitterMax", residual / 27e6, "s");
++            recordPhysicalRate(this, "outputSystemClockPpm", outputFit, 27e6);
++        }
++    }
++};
++
++Define_Module(Iec61883TsListener);
++
++// ---- CRF media clock reference ----------------------------------------------------
++
++class CrfTalker : public AvtpMediaStreamBase
++{
++    uint32_t baseFrequency = 48000;
++    uint8_t pull = 0, type = CRF_AUDIO_SAMPLE;
++    unsigned timestampInterval = 160, timestampsPerPdu = 6;
++    simtime_t timestampOffset;
++    uint64_t pduIndex = 0;
++    LinearFit production;   // media clock events -> simulation time
++  protected:
++    virtual uint8_t expectedSubtype() const override { return AVTP_SUBTYPE_CRF; }
++
++    virtual void initialize(int stage) override
++    {
++        AvtpMediaStreamBase::initialize(stage);
++        if (stage == INITSTAGE_LOCAL) {
++            baseFrequency = par("baseFrequency");
++            pull = par("pull");
++            type = par("crfType");
++            timestampInterval = par("timestampInterval");
++            timestampsPerPdu = par("timestampsPerPdu");
++            timestampOffset = par("timestampOffset");
++            if (timestampOffset < 0)
++                timestampOffset = maxTransitTime;
++            if (baseFrequency == 0 || baseFrequency > 0x1fffffff || pull > 5 || timestampInterval < 1
++                    || timestampInterval > 0xffff || timestampsPerPdu < 1 || timestampsPerPdu > 185)
++                throw cRuntimeError("invalid CRF talker parameters");
++        }
++    }
++
++    double eventTime(uint64_t j) const { return double(j) * timestampInterval / baseFrequency; }
++
++    virtual void startStreaming() override
++    {
++        // The talker is the media clock source and knows its future edges: PDU k is
++        // sent at its first event, so every timestamp reaches the listener in advance.
++        scheduleTimerAt(mediaClock(eventTime(0)) + ClockTime::from(processingDelay));
++    }
++
++    virtual void onTimer() override
++    {
++        const uint64_t first = pduIndex * timestampsPerPdu;
++        auto pdu = makeShared<AvtpCrfPdu>();
++        pdu->setSequenceNum(sequenceNum);
++        pdu->setType(type);
++        pdu->setStreamId(streamId);
++        pdu->setPull(pull);
++        pdu->setBaseFrequency(baseFrequency);
++        pdu->setTimestampInterval(timestampInterval);
++        pdu->setCrfTimestampArraySize(timestampsPerPdu);
++        for (unsigned i = 0; i < timestampsPerPdu; ++i) {
++            const clocktime_t event = mediaClock(eventTime(first + i));
++            pdu->setCrfTimestamp(i, (event + ClockTime::from(timestampOffset)).inUnit(SIMTIME_NS));
++            production.add(double((first + i) * timestampInterval), simTimeOf(event).inUnit(SIMTIME_NS));
++        }
++        pdu->setCrfDataLength(8 * timestampsPerPdu);
++        pdu->setChunkLength(B(AVTP_CRF_HEADER_BYTES + 8 * timestampsPerPdu));
++        auto packet = new Packet("AVTP-CRF");
++        packet->insertAtBack(pdu);
++        sendPdu(packet);
++        ++pduIndex;
++        scheduleTimerAt(mediaClock(eventTime(pduIndex * timestampsPerPdu)) + ClockTime::from(processingDelay));
++    }
++
++    virtual void onPdu(const DecodedMediaPdu&, Packet *) override {}
++
++    virtual void finish() override
++    {
++        AvtpMediaStreamBase::finish();
++        recordPhysicalRate(this, "productionMediaClockPpm", production, baseFrequency);
++    }
++};
++
++Define_Module(CrfTalker);
++
++class CrfListener : public AvtpMediaStreamBase
++{
++    bool haveLast = false;
++    uint64_t lastTimestamp = 0, eventCount = 0;
++    long timestampsReceived = 0, nonMonotonic = 0, parameterChanges = 0, lateTimestamps = 0;
++    uint32_t baseFrequency = 0;
++    uint16_t interval = 0;
++    uint8_t pull = 0;
++    LinearFit fit, regenerated;   // events -> timestamp / simulation time at which this clock reaches it
++    simsignal_t slackToTimestamp;
++
++  protected:
++    virtual uint8_t expectedSubtype() const override { return AVTP_SUBTYPE_CRF; }
++
++    virtual void initialize(int stage) override
++    {
++        AvtpMediaStreamBase::initialize(stage);
++        if (stage == INITSTAGE_LOCAL)
++            slackToTimestamp = registerSignal("crfTimestampSlack");
++    }
++
++    static double pullFactor(uint8_t pull)
++    {
++        static const double factors[] = {1.0, 1.0 / 1.001, 1.001, 24.0 / 25.0, 25.0 / 24.0, 1.0 / 8.0};
++        return factors[pull];
++    }
++
++    virtual void onPdu(const DecodedMediaPdu& pdu, Packet *) override
++    {
++        if (baseFrequency != 0 && (pdu.baseFrequency != baseFrequency || pdu.timestampInterval != interval || pdu.pull != pull))
++            ++parameterChanges;
++        baseFrequency = pdu.baseFrequency;
++        interval = pdu.timestampInterval;
++        pull = pdu.pull;
++        const int64_t now = getClockTime().inUnit(SIMTIME_NS);
++        for (uint64_t timestamp : pdu.crfTimestamps) {
++            ++timestampsReceived;
++            if (haveLast && timestamp <= lastTimestamp)
++                ++nonMonotonic;
++            // Media clock events between consecutive timestamps (robust to lost PDUs).
++            if (haveLast) {
++                const double nominal = 1e9 * interval / (baseFrequency * pullFactor(pull));
++                eventCount += std::max<int64_t>(1, std::llround((double(timestamp) - double(lastTimestamp)) / nominal));
++            }
++            haveLast = true;
++            lastTimestamp = timestamp;
++            fit.add(double(eventCount), double(timestamp));
++            // The regenerated media clock ticks when the local gPTP clock reaches the timestamp.
++            regenerated.add(double(eventCount) * interval, simTimeOf(ClockTime(int64_t(timestamp), SIMTIME_NS)).inUnit(SIMTIME_NS));
++            const int64_t slack = int64_t(timestamp) - now;
++            if (slack < 0)
++                ++lateTimestamps;
++            emit(slackToTimestamp, SimTime(slack, SIMTIME_NS));
++        }
++    }
++
++    virtual void finish() override
++    {
++        AvtpMediaStreamBase::finish();
++        recordScalar("crfTimestampsReceived", timestampsReceived);
++        recordScalar("crfNonMonotonic", nonMonotonic);
++        recordScalar("crfParameterChanges", parameterChanges);
++        recordScalar("crfLateTimestamps", lateTimestamps);
++        if (fit.valid() && baseFrequency > 0) {
++            double slope, residual;   // ns per 'interval' media clock events
++            fit.solve(slope, residual);
++            const double frequency = 1e9 * interval / slope;
++            recordScalar("recoveredMediaClock", frequency);
++            recordScalar("recoveredMediaClockPpm", (frequency / (baseFrequency * pullFactor(pull)) - 1) * 1e6);
++            recordScalar("crfTimestampJitterMax", residual * 1e-9, "s");
++            recordPhysicalRate(this, "regeneratedMediaClockPpm", regenerated, baseFrequency * pullFactor(pull));
++        }
++    }
++};
++
++Define_Module(CrfListener);
++
++} // namespace SignalsAndGateways
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.cc b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.cc
+new file mode 100644
+index 0000000..fe8c7b6
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.cc
+@@ -0,0 +1,410 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++#include "signalsandgateways/inet4/avtp/media/AvtpMediaCodec.h"
++
++#include <algorithm>
++
++namespace SignalsAndGateways {
++namespace avtp {
++namespace media {
++
++namespace {
++const uint8_t SUBTYPE_61883 = 0x00, SUBTYPE_AAF = 0x02, SUBTYPE_CRF = 0x04;
++const size_t AAF_HEADER = 24, CRF_HEADER = 20, IEC61883_HEADER = 24, CIP_HEADER = 8, SOURCE_PACKET = 192, TS = 188;
++
++uint16_t be16(const uint8_t *p) { return uint16_t((p[0] << 8) | p[1]); }
++uint32_t be32(const uint8_t *p) { return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3]; }
++uint64_t be64(const uint8_t *p) { return (uint64_t(be32(p)) << 32) | be32(p + 4); }
++
++void decodeAaf(const uint8_t *p, size_t size, DecodedMediaPdu& out)
++{
++    if (size < AAF_HEADER) {
++        out.error = MediaError::PDU_TOO_SHORT;
++        return;
++    }
++    out.tv = p[1] & 0x01;
++    out.avtpTimestamp = be32(p + 12);
++    out.format = p[16];
++    out.nsr = p[17] >> 4;
++    out.channelsPerFrame = be16(p + 17) & 0x3ff;
++    out.bitDepth = p[19];
++    const uint16_t length = be16(p + 20);
++    out.sp = p[22] & 0x10;
++    out.evt = p[22] & 0x0f;
++    if (AAF_HEADER + length > size)
++        out.error = MediaError::DATA_LENGTH_EXCEEDS_PDU;
++    else if (out.format == AAF_USER || out.format > AAF_INT_16BIT)
++        out.error = MediaError::AAF_FORMAT_NOT_PCM;     // user-defined (0) has no PCM container size
++    else if (out.channelsPerFrame == 0)
++        out.error = MediaError::AAF_CHANNELS_ZERO;
++    else if (out.bitDepth == 0 || (out.format == AAF_FLOAT_32BIT && out.bitDepth != 32)
++             || out.bitDepth > 8 * aafContainerBytes(out.format))
++        out.error = MediaError::AAF_BIT_DEPTH_INVALID;
++    else if (length % (out.channelsPerFrame * aafContainerBytes(out.format)) != 0)
++        out.error = MediaError::AAF_PARTIAL_FRAME;
++    else
++        out.samples.assign(p + AAF_HEADER, p + AAF_HEADER + length);
++}
++
++void decodeCrf(const uint8_t *p, size_t size, DecodedMediaPdu& out)
++{
++    if (size < CRF_HEADER) {
++        out.error = MediaError::PDU_TOO_SHORT;
++        return;
++    }
++    out.fs = p[1] & 0x02;
++    out.crfType = p[3];
++    const uint32_t word = be32(p + 12);
++    out.pull = word >> 29;
++    out.baseFrequency = word & 0x1fffffff;
++    const uint16_t length = be16(p + 16);
++    out.timestampInterval = be16(p + 18);
++    if (length == 0 || length % 8 != 0)
++        out.error = MediaError::CRF_DATA_LENGTH_INVALID;
++    else if (CRF_HEADER + length > size)
++        out.error = MediaError::DATA_LENGTH_EXCEEDS_PDU;
++    else if (out.baseFrequency == 0)
++        out.error = MediaError::CRF_BASE_FREQUENCY_ZERO;
++    else if (out.pull > 5)
++        out.error = MediaError::CRF_PULL_RESERVED;
++    else
++        for (size_t i = 0; i < length / 8; ++i)
++            out.crfTimestamps.push_back(be64(p + CRF_HEADER + 8 * i));
++}
++
++void decode61883(const uint8_t *p, size_t size, DecodedMediaPdu& out)
++{
++    if (size < IEC61883_HEADER) {
++        out.error = MediaError::PDU_TOO_SHORT;
++        return;
++    }
++    out.gv = p[1] & 0x02;
++    out.tv = p[1] & 0x01;
++    out.avtpTimestamp = be32(p + 12);
++    out.gatewayInfo = be32(p + 16);
++    const uint16_t length = be16(p + 20);
++    const uint8_t tag = p[22] >> 6, channel = p[22] & 0x3f, tcode = p[23] >> 4;
++    if (IEC61883_HEADER + length > size) {
++        out.error = MediaError::DATA_LENGTH_EXCEEDS_PDU;
++        return;
++    }
++    if (tag != 1) {
++        out.error = MediaError::IEC61883_NO_CIP;
++        return;
++    }
++    if (channel != 31) {
++        out.error = MediaError::IEC61883_CHANNEL_NOT_AVTP;
++        return;
++    }
++    if (tcode != 0x0A) {
++        out.error = MediaError::IEC61883_TCODE;
++        return;
++    }
++    if (length < CIP_HEADER) {
++        out.error = MediaError::PDU_TOO_SHORT;
++        return;
++    }
++    const uint8_t *cip = p + IEC61883_HEADER;
++    out.sid = cip[0] & 0x3f;
++    out.dbs = cip[1];
++    out.fn = cip[2] >> 6;
++    out.qpc = (cip[2] >> 3) & 7;
++    out.sph = cip[2] & 0x04;
++    out.dbc = cip[3];
++    out.fmt = cip[4] & 0x3f;
++    out.tsf = cip[5] & 0x80;
++    if ((cip[0] >> 6) != 0 || (cip[4] >> 6) != 2)
++        out.error = MediaError::IEC61883_CIP_QUADLET_INDICATOR;
++    else if (out.sid != 63)
++        out.error = MediaError::IEC61883_SID_NOT_AVTP;
++    else if (out.fmt != 0x20)
++        out.error = MediaError::IEC61883_FORMAT_UNSUPPORTED;
++    else if (out.dbs != 6 || out.fn != 3 || out.qpc != 0 || !out.sph)
++        out.error = MediaError::IEC61883_4_CIP_PARAMETERS;
++    else if ((length - CIP_HEADER) % SOURCE_PACKET != 0)
++        out.error = MediaError::IEC61883_4_DATA_LENGTH;
++    if (out.error != MediaError::NONE)
++        return;
++    for (size_t offset = IEC61883_HEADER + CIP_HEADER; offset < IEC61883_HEADER + length; offset += SOURCE_PACKET) {
++        SourcePacket sp;
++        sp.timestamp = be32(p + offset);
++        sp.tsPacket.assign(p + offset + 4, p + offset + 4 + TS);
++        out.sourcePackets.push_back(std::move(sp));
++    }
++}
++
++void putSection(Bytes& packet, const Bytes& section)
++{
++    packet.push_back(0x00);     // pointer_field
++    packet.insert(packet.end(), section.begin(), section.end());
++    packet.resize(TS, 0xFF);    // stuffing
++}
++
++void appendCrc(Bytes& section)
++{
++    const uint32_t crc = crc32Mpeg2(section.data(), section.size());
++    for (int shift = 24; shift >= 0; shift -= 8)
++        section.push_back((crc >> shift) & 0xFF);
++}
++
++} // namespace
++
++const char *toString(MediaError error)
++{
++    switch (error) {
++        case MediaError::NONE: return "NONE";
++        case MediaError::PDU_TOO_SHORT: return "PDU_TOO_SHORT";
++        case MediaError::UNSUPPORTED_SUBTYPE: return "UNSUPPORTED_SUBTYPE";
++        case MediaError::UNSUPPORTED_VERSION: return "UNSUPPORTED_VERSION";
++        case MediaError::STREAM_ID_NOT_VALID: return "STREAM_ID_NOT_VALID";
++        case MediaError::DATA_LENGTH_EXCEEDS_PDU: return "DATA_LENGTH_EXCEEDS_PDU";
++        case MediaError::AAF_FORMAT_NOT_PCM: return "AAF_FORMAT_NOT_PCM";
++        case MediaError::AAF_CHANNELS_ZERO: return "AAF_CHANNELS_ZERO";
++        case MediaError::AAF_BIT_DEPTH_INVALID: return "AAF_BIT_DEPTH_INVALID";
++        case MediaError::AAF_PARTIAL_FRAME: return "AAF_PARTIAL_FRAME";
++        case MediaError::CRF_DATA_LENGTH_INVALID: return "CRF_DATA_LENGTH_INVALID";
++        case MediaError::CRF_BASE_FREQUENCY_ZERO: return "CRF_BASE_FREQUENCY_ZERO";
++        case MediaError::CRF_PULL_RESERVED: return "CRF_PULL_RESERVED";
++        case MediaError::IEC61883_NO_CIP: return "IEC61883_NO_CIP";
++        case MediaError::IEC61883_CHANNEL_NOT_AVTP: return "IEC61883_CHANNEL_NOT_AVTP";
++        case MediaError::IEC61883_TCODE: return "IEC61883_TCODE";
++        case MediaError::IEC61883_CIP_QUADLET_INDICATOR: return "IEC61883_CIP_QUADLET_INDICATOR";
++        case MediaError::IEC61883_SID_NOT_AVTP: return "IEC61883_SID_NOT_AVTP";
++        case MediaError::IEC61883_FORMAT_UNSUPPORTED: return "IEC61883_FORMAT_UNSUPPORTED";
++        case MediaError::IEC61883_4_CIP_PARAMETERS: return "IEC61883_4_CIP_PARAMETERS";
++        case MediaError::IEC61883_4_DATA_LENGTH: return "IEC61883_4_DATA_LENGTH";
++    }
++    return "?";
++}
++
++size_t aafContainerBytes(uint8_t format)
++{
++    switch (format) {
++        case AAF_FLOAT_32BIT:
++        case AAF_INT_32BIT: return 4;
++        case AAF_INT_24BIT: return 3;
++        case AAF_INT_16BIT: return 2;
++        default: return 0;
++    }
++}
++
++uint32_t nsrToHz(uint8_t nsr)
++{
++    static const uint32_t rates[] = {0, 8000, 16000, 32000, 44100, 48000, 88200, 96000, 176400, 192000, 24000};
++    return nsr < sizeof(rates) / sizeof(rates[0]) ? rates[nsr] : 0;
++}
++
++uint8_t hzToNsr(uint32_t hz)
++{
++    for (uint8_t nsr = 1; nsr <= 0x0A; ++nsr)
++        if (nsrToHz(nsr) == hz)
++            return nsr;
++    return 0;
++}
++
++DecodedMediaPdu decodeMediaPdu(const uint8_t *p, size_t size)
++{
++    DecodedMediaPdu out;
++    if (size < 12) {
++        out.error = MediaError::PDU_TOO_SHORT;
++        return out;
++    }
++    out.subtype = p[0];
++    out.mr = p[1] & 0x08;
++    out.sequenceNum = p[2];
++    out.tu = p[3] & 0x01;
++    out.streamId = be64(p + 4);
++    if (out.subtype != SUBTYPE_AAF && out.subtype != SUBTYPE_CRF && out.subtype != SUBTYPE_61883)
++        out.error = MediaError::UNSUPPORTED_SUBTYPE;
++    else if (((p[1] >> 4) & 7) != 0)
++        out.error = MediaError::UNSUPPORTED_VERSION;
++    else if (!(p[1] & 0x80))
++        out.error = MediaError::STREAM_ID_NOT_VALID;
++    if (out.error != MediaError::NONE)
++        return out;
++    if (out.subtype == SUBTYPE_AAF)
++        decodeAaf(p, size, out);
++    else if (out.subtype == SUBTYPE_CRF)
++        decodeCrf(p, size, out);
++    else
++        decode61883(p, size, out);
++    return out;
++}
++
++int32_t pcmPatternSample(uint64_t n, unsigned channel, unsigned bitDepth, uint32_t step)
++{
++    const uint64_t modulus = 1ull << bitDepth;
++    const uint64_t raw = ((n + 1000ull * channel) * step) & (modulus - 1);
++    return int32_t(int64_t(raw) - (raw >= modulus / 2 ? int64_t(modulus) : 0));
++}
++
++void putPcmSample(Bytes& out, int32_t value, size_t containerBytes, unsigned bitDepth)
++{
++    const uint32_t word = uint32_t(value) << (8 * containerBytes - bitDepth);
++    for (int i = int(containerBytes) - 1; i >= 0; --i)
++        out.push_back((word >> (8 * i)) & 0xFF);
++}
++
++int32_t getPcmSample(const uint8_t *in, size_t containerBytes, unsigned bitDepth)
++{
++    uint32_t word = 0;
++    for (size_t i = 0; i < containerBytes; ++i)
++        word = (word << 8) | in[i];
++    const unsigned shift = 32 - 8 * containerBytes;
++    // Sign-extend the container, then drop the unused low bits.
++    return (int32_t(word << shift) >> shift) >> (8 * containerBytes - bitDepth);
++}
++
++uint64_t pcmPatternIndex(int32_t value, unsigned bitDepth, uint32_t step)
++{
++    const uint64_t modulus = 1ull << bitDepth;
++    // Inverse of the odd step modulo 2^bitDepth (Newton iteration).
++    uint64_t inverse = step;
++    for (int i = 0; i < 6; ++i)
++        inverse = (inverse * (2 - step * inverse)) & (modulus - 1);
++    return (uint64_t(uint32_t(value)) * inverse) & (modulus - 1);
++}
++
++uint32_t crc32Mpeg2(const uint8_t *data, size_t length)
++{
++    uint32_t crc = 0xFFFFFFFFu;
++    for (size_t i = 0; i < length; ++i) {
++        crc ^= uint32_t(data[i]) << 24;
++        for (int bit = 0; bit < 8; ++bit)
++            crc = (crc & 0x80000000u) ? (crc << 1) ^ 0x04C11DB7u : crc << 1;
++    }
++    return crc;
++}
++
++TsPacketInfo parseTsPacket(const uint8_t *p)
++{
++    TsPacketInfo info;
++    info.syncOk = p[0] == 0x47;
++    info.tei = p[1] & 0x80;
++    info.pusi = p[1] & 0x40;
++    info.pid = uint16_t(((p[1] & 0x1f) << 8) | p[2]);
++    info.scrambling = p[3] >> 6;
++    info.adaptationFieldControl = (p[3] >> 4) & 3;
++    info.continuityCounter = p[3] & 0x0f;
++    size_t offset = 4;
++    if (info.adaptationFieldControl & 2) {
++        const uint8_t length = p[4];
++        if (length > 183)
++            return info;
++        if (length > 0) {
++            info.discontinuity = p[5] & 0x80;
++            if ((p[5] & 0x10) && length >= 7) {
++                const uint8_t *pcr = p + 6;
++                const uint64_t base = (uint64_t(pcr[0]) << 25) | (uint64_t(pcr[1]) << 17) | (uint64_t(pcr[2]) << 9)
++                        | (uint64_t(pcr[3]) << 1) | (pcr[4] >> 7);
++                const uint64_t extension = (uint64_t(pcr[4] & 1) << 8) | pcr[5];
++                info.hasPcr = true;
++                info.pcr27 = base * 300 + extension;
++            }
++        }
++        offset += 1 + length;
++    }
++    info.payloadOffset = (info.adaptationFieldControl & 1) ? offset : 188;
++    return info;
++}
++
++TsPayloadCheck checkTsPsiPacket(const Bytes& ts, const TsPacketInfo& info, const Bytes& expectedSection)
++{
++    // pointer_field, then one section: table_id, section_length, ..., CRC_32.
++    if (info.payloadOffset >= ts.size())
++        return TsPayloadCheck::PAYLOAD_MISSING;
++    const size_t start = info.payloadOffset + 1 + ts[info.payloadOffset];
++    if (start + 3 > ts.size())
++        return TsPayloadCheck::PAYLOAD_MISSING;
++    const size_t length = 3 + (((ts[start + 1] & 0x0f) << 8) | ts[start + 2]);
++    if (length < 3 + 4 || start + length > ts.size())
++        return TsPayloadCheck::PSI_INVALID;
++    // The CRC over the whole section including CRC_32 is zero.
++    if (crc32Mpeg2(ts.data() + start, length) != 0)
++        return TsPayloadCheck::PSI_INVALID;
++    if (length != expectedSection.size() || !std::equal(expectedSection.begin(), expectedSection.end(), ts.begin() + start))
++        return TsPayloadCheck::MISMATCH;
++    return TsPayloadCheck::OK;
++}
++
++TsPayloadCheck checkTsEsPacket(const Bytes& ts, const TsPacketInfo& info)
++{
++    // 4 byte packet index, then (index + byte offset) & 0xFF up to the end of the packet.
++    if (info.payloadOffset + 4 > ts.size())
++        return TsPayloadCheck::PAYLOAD_MISSING;
++    const uint32_t index = be32(ts.data() + info.payloadOffset);
++    for (size_t j = info.payloadOffset + 4; j < ts.size(); ++j)
++        if (ts[j] != uint8_t(index + j))
++            return TsPayloadCheck::MISMATCH;
++    return TsPayloadCheck::OK;
++}
++
++Bytes TsGenerator::patSection(const TsGeneratorConfig& c)
++{
++    Bytes s = {0x00, 0xB0, 0x0D, uint8_t(c.transportStreamId >> 8), uint8_t(c.transportStreamId), 0xC1, 0x00, 0x00,
++               uint8_t(c.programNumber >> 8), uint8_t(c.programNumber), uint8_t(0xE0 | (c.pmtPid >> 8)), uint8_t(c.pmtPid)};
++    appendCrc(s);
++    return s;
++}
++
++Bytes TsGenerator::pmtSection(const TsGeneratorConfig& c)
++{
++    // table_id 2, section_length 23 = 9 fixed + 2 x 5 stream entries + 4 CRC
++    Bytes s = {0x02, 0xB0, 0x17, uint8_t(c.programNumber >> 8), uint8_t(c.programNumber), 0xC1, 0x00, 0x00,
++               uint8_t(0xE0 | (c.videoPid >> 8)), uint8_t(c.videoPid), 0xF0, 0x00,
++               c.videoStreamType, uint8_t(0xE0 | (c.videoPid >> 8)), uint8_t(c.videoPid), 0xF0, 0x00,
++               c.audioStreamType, uint8_t(0xE0 | (c.audioPid >> 8)), uint8_t(c.audioPid), 0xF0, 0x00};
++    appendCrc(s);
++    return s;
++}
++
++Bytes TsGenerator::packet(uint64_t index, uint64_t pcr27)
++{
++    uint16_t pid;
++    bool psi = false, withPcr = false;
++    Bytes section;
++    if (index % config.psiIntervalPackets == 0) {
++        pid = 0x0000;
++        section = patSection(config);
++        psi = true;
++    }
++    else if (index % config.psiIntervalPackets == 1) {
++        pid = config.pmtPid;
++        section = pmtSection(config);
++        psi = true;
++    }
++    else if (index % config.audioEveryPackets == config.audioEveryPackets - 1)
++        pid = config.audioPid;
++    else {
++        pid = config.videoPid;
++        withPcr = index >= nextPcr;
++        if (withPcr)
++            nextPcr += config.pcrIntervalPackets;
++    }
++    uint8_t& cc = continuity[pid];
++    Bytes p = {0x47, uint8_t((psi ? 0x40 : 0) | (pid >> 8)), uint8_t(pid), uint8_t((withPcr ? 0x30 : 0x10) | cc)};
++    cc = (cc + 1) & 0x0f;
++    if (withPcr) {
++        const uint64_t base = (pcr27 / 300) & ((1ull << 33) - 1), extension = pcr27 % 300;
++        p.push_back(7);         // adaptation_field_length
++        p.push_back(0x10);      // PCR_flag
++        p.push_back(uint8_t(base >> 25));
++        p.push_back(uint8_t(base >> 17));
++        p.push_back(uint8_t(base >> 9));
++        p.push_back(uint8_t(base >> 1));
++        p.push_back(uint8_t(((base & 1) << 7) | 0x7E | (extension >> 8)));
++        p.push_back(uint8_t(extension));
++    }
++    if (psi) {
++        putSection(p, section);
++        return p;
++    }
++    for (int shift = 24; shift >= 0; shift -= 8)
++        p.push_back(uint8_t(index >> shift));
++    for (size_t j = p.size(); j < TS; ++j)
++        p.push_back(uint8_t(index + j));
++    return p;
++}
++
++} // namespace media
++} // namespace avtp
++} // namespace SignalsAndGateways
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.h b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.h
+new file mode 100644
+index 0000000..9dd081d
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.h
+@@ -0,0 +1,157 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// Validating byte-level decoder for IEEE 1722-2016 AAF (PCM), CRF and 61883/IIDC
++// (IEC 61883-4 MPEG-2 TS) PDUs, independent of the chunk serializers, plus the
++// synthetic media content used by the talkers and checked by the listeners:
++// a PCM test pattern and an MPEG-2 transport stream (PAT, PMT, PCR, video/audio PIDs).
++#ifndef SIGNALSANDGATEWAYS_AVTPMEDIACODEC_H_
++#define SIGNALSANDGATEWAYS_AVTPMEDIACODEC_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <map>
++#include <vector>
++
++namespace SignalsAndGateways {
++namespace avtp {
++namespace media {
++
++using Bytes = std::vector<uint8_t>;
++
++enum class MediaError {
++    NONE,
++    PDU_TOO_SHORT,
++    UNSUPPORTED_SUBTYPE,
++    UNSUPPORTED_VERSION,
++    STREAM_ID_NOT_VALID,
++    DATA_LENGTH_EXCEEDS_PDU,
++    AAF_FORMAT_NOT_PCM,
++    AAF_CHANNELS_ZERO,
++    AAF_BIT_DEPTH_INVALID,
++    AAF_PARTIAL_FRAME,
++    CRF_DATA_LENGTH_INVALID,
++    CRF_BASE_FREQUENCY_ZERO,
++    CRF_PULL_RESERVED,
++    IEC61883_NO_CIP,
++    IEC61883_CHANNEL_NOT_AVTP,
++    IEC61883_TCODE,
++    IEC61883_CIP_QUADLET_INDICATOR,
++    IEC61883_SID_NOT_AVTP,
++    IEC61883_FORMAT_UNSUPPORTED,
++    IEC61883_4_CIP_PARAMETERS,
++    IEC61883_4_DATA_LENGTH,
++};
++
++const char *toString(MediaError error);
++
++enum AafFormat : uint8_t { AAF_USER = 0x00, AAF_FLOAT_32BIT = 0x01, AAF_INT_32BIT = 0x02, AAF_INT_24BIT = 0x03, AAF_INT_16BIT = 0x04 };
++enum CrfType : uint8_t { CRF_USER = 0x00, CRF_AUDIO_SAMPLE = 0x01, CRF_VIDEO_FRAME = 0x02, CRF_VIDEO_LINE = 0x03, CRF_MACHINE_CYCLE = 0x04 };
++
++// Container bytes of an AAF PCM sample (0 for the user format).
++size_t aafContainerBytes(uint8_t format);
++// Nominal sample rate code (nsr) <-> Hz; 0 = user-specified / unknown.
++uint32_t nsrToHz(uint8_t nsr);
++uint8_t hzToNsr(uint32_t hz);
++
++struct SourcePacket {
++    uint32_t timestamp = 0;     // source packet header: presentation time, gPTP ns mod 2^32
++    Bytes tsPacket;             // 188 bytes
++};
++
++struct DecodedMediaPdu {
++    MediaError error = MediaError::NONE;
++    uint8_t subtype = 0;
++    uint8_t sequenceNum = 0;
++    uint64_t streamId = 0;
++    bool mr = false, tv = false, tu = false;
++    uint32_t avtpTimestamp = 0;
++    // AAF
++    uint8_t format = 0, nsr = 0, bitDepth = 0, evt = 0;
++    uint16_t channelsPerFrame = 0;
++    bool sp = false;
++    Bytes samples;
++    // CRF
++    uint8_t crfType = 0, pull = 0;
++    bool fs = false;
++    uint32_t baseFrequency = 0;
++    uint16_t timestampInterval = 0;
++    std::vector<uint64_t> crfTimestamps;
++    // IEC 61883-4
++    bool gv = false;
++    uint32_t gatewayInfo = 0;
++    uint8_t dbs = 0, fn = 0, qpc = 0, dbc = 0, fmt = 0, sid = 0;
++    bool sph = false, tsf = false;
++    std::vector<SourcePacket> sourcePackets;
++};
++
++// Decodes one AAF, CRF or 61883/IIDC PDU; bytes beyond the declared data length
++// (Ethernet padding) are ignored.
++DecodedMediaPdu decodeMediaPdu(const uint8_t *data, size_t size);
++inline DecodedMediaPdu decodeMediaPdu(const Bytes& b) { return decodeMediaPdu(b.data(), b.size()); }
++
++// ---- synthetic content ---------------------------------------------------------
++
++// PCM test pattern: sample n of channel c is ((n + 1000 c) * step) mod 2^bitDepth as a
++// signed two's complement value. With an odd step, n mod 2^bitDepth can be recovered.
++int32_t pcmPatternSample(uint64_t n, unsigned channel, unsigned bitDepth, uint32_t step);
++// Big-endian container encoding, the bitDepth valid bits left-justified.
++void putPcmSample(Bytes& out, int32_t value, size_t containerBytes, unsigned bitDepth);
++int32_t getPcmSample(const uint8_t *in, size_t containerBytes, unsigned bitDepth);
++// Sample index (mod 2^bitDepth) whose channel-0 pattern value is 'value'.
++uint64_t pcmPatternIndex(int32_t value, unsigned bitDepth, uint32_t step);
++
++// CRC-32/MPEG-2 (poly 0x04C11DB7, init 0xFFFFFFFF, not reflected, no final XOR).
++uint32_t crc32Mpeg2(const uint8_t *data, size_t length);
++
++struct TsPacketInfo {
++    bool syncOk = false, tei = false, pusi = false, discontinuity = false, hasPcr = false;
++    uint16_t pid = 0;
++    uint8_t scrambling = 0, adaptationFieldControl = 0, continuityCounter = 0;
++    uint64_t pcr27 = 0;         // PCR in 27 MHz ticks (base * 300 + extension)
++    size_t payloadOffset = 188;
++};
++TsPacketInfo parseTsPacket(const uint8_t *packet);
++
++// Payload checks of one received TS packet against the TsGenerator stream. All reads stay
++// inside 'ts'; a packet without the needed payload (adaptation field only, pointer_field or
++// section header outside the packet, ES payload < 4 bytes) is PAYLOAD_MISSING.
++enum class TsPayloadCheck { OK, PAYLOAD_MISSING, PSI_INVALID, MISMATCH };
++// PAT/PMT: one complete section with valid section_length and CRC_32, equal to 'expectedSection'.
++TsPayloadCheck checkTsPsiPacket(const Bytes& ts, const TsPacketInfo& info, const Bytes& expectedSection);
++// Video/audio: packet index in the first 4 payload bytes, then the byte pattern.
++TsPayloadCheck checkTsEsPacket(const Bytes& ts, const TsPacketInfo& info);
++
++struct TsGeneratorConfig {
++    uint16_t transportStreamId = 1;
++    uint16_t programNumber = 1;
++    uint16_t pmtPid = 0x1000;
++    uint16_t videoPid = 0x0100;             // also the PCR PID
++    uint16_t audioPid = 0x0110;
++    uint8_t videoStreamType = 0x1B;         // H.264
++    uint8_t audioStreamType = 0x0F;         // AAC (ADTS)
++    unsigned psiIntervalPackets = 1000;     // PAT at index % interval == 0, PMT at 1
++    unsigned pcrIntervalPackets = 397;      // PCR on the first video packet at or after each due index (2, 2 + n, ...)
++    unsigned audioEveryPackets = 10;        // audio packet at index % n == n - 1
++};
++
++// Synthetic MPEG-2 TS: call packet() with consecutive indices. Elementary stream
++// packets carry the packet index in their first 4 payload bytes followed by the
++// pattern (index + byte) & 0xFF; PAT and PMT are complete sections with CRC.
++class TsGenerator {
++public:
++    explicit TsGenerator(const TsGeneratorConfig& config) : config(config) {}
++    Bytes packet(uint64_t index, uint64_t pcr27);
++    static Bytes patSection(const TsGeneratorConfig& config);
++    static Bytes pmtSection(const TsGeneratorConfig& config);
++    const TsGeneratorConfig& getConfig() const { return config; }
++private:
++    TsGeneratorConfig config;
++    std::map<uint16_t, uint8_t> continuity;
++    uint64_t nextPcr = 2;
++};
++
++} // namespace media
++} // namespace avtp
++} // namespace SignalsAndGateways
++
++#endif
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaSelfTest.cc b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaSelfTest.cc
+new file mode 100644
+index 0000000..39d89fe
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaSelfTest.cc
+@@ -0,0 +1,316 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// Golden vectors for AAF PCM, CRF and IEC 61883-4 were written by hand from the
++// IEEE 1722-2016 field tables (cross-checked with Open1722, the Wireshark dissector
++// and OpenAvnu); they are independent of the serializer code. Also: serializer
++// round trips, decoder rejection of malformed PDUs, MPEG-2 TS / PCR / CRC helpers
++// and the PCM test pattern.
++#include <string>
++
++#include "inet/common/packet/Packet.h"
++#include "inet/common/packet/chunk/BytesChunk.h"
++#include "signalsandgateways/inet4/avtp/media/AvtpMedia_m.h"
++#include "signalsandgateways/inet4/avtp/media/AvtpMediaCodec.h"
++
++using namespace omnetpp;
++using namespace inet;
++
++namespace SignalsAndGateways {
++
++using namespace avtp::media;
++
++class AvtpMediaSelfTest : public cSimpleModule
++{
++    int passed = 0, failed = 0;
++
++    void check(const std::string& name, bool condition)
++    {
++        condition ? ++passed : ++failed;
++        EV_INFO << "CHECK " << name << (condition ? " PASS" : " FAIL") << endl;
++        if (!condition)
++            std::cout << "AVTP media self-test FAILED: " << name << endl;
++    }
++
++    static Bytes hex(const std::string& text)
++    {
++        Bytes out;
++        for (size_t i = 0; i + 1 < text.size();) {
++            if (text[i] == ' ') { ++i; continue; }
++            out.push_back(uint8_t(std::stoul(text.substr(i, 2), nullptr, 16)));
++            i += 2;
++        }
++        return out;
++    }
++
++    static Bytes serialize(const std::vector<Ptr<const Chunk>>& chunks)
++    {
++        Packet packet("golden");
++        for (const auto& chunk : chunks)
++            packet.insertAtBack(chunk);
++        return packet.peekAllAsBytes()->getBytes();
++    }
++
++    static const uint64_t STREAM = 0x0200000001010001ull;
++
++    void testAaf()
++    {
++        auto h = makeShared<AvtpAafPcmHeader>();
++        h->setSequenceNum(0x12);
++        h->setStreamId(STREAM);
++        h->setAvtpTimestamp(0x11223344);
++        h->setFormat(AAF_INT_16BIT);
++        h->setNsr(hzToNsr(48000));
++        h->setChannelsPerFrame(2);
++        h->setBitDepth(16);
++        h->setStreamDataLength(4);
++        Bytes samples;
++        putPcmSample(samples, pcmPatternSample(0, 0, 16, 331), 2, 16);
++        putPcmSample(samples, pcmPatternSample(0, 1, 16, 331), 2, 16);   // 1000 * 331 mod 2^16 = 0x0CF8
++        const Bytes wire = serialize({h, makeShared<BytesChunk>(samples)});
++        check("aaf-golden", wire == hex("02 81 12 00 0200000001010001 11223344 04 5002 10 0004 00 00 0000 0cf8"));
++        const DecodedMediaPdu d = decodeMediaPdu(wire);
++        check("aaf-decode", d.error == MediaError::NONE && d.subtype == 0x02 && d.sequenceNum == 0x12
++                && d.streamId == STREAM && d.tv && d.avtpTimestamp == 0x11223344 && d.format == AAF_INT_16BIT
++                && d.nsr == 5 && d.channelsPerFrame == 2 && d.bitDepth == 16 && d.samples == samples);
++        Packet packet("roundtrip", makeShared<BytesChunk>(wire));
++        const auto& back = packet.peekAtFront<AvtpAafPcmHeader>();
++        check("aaf-deserialize", back->getSequenceNum() == 0x12 && back->getNsr() == 5 && back->getChannelsPerFrame() == 2
++                && back->getBitDepth() == 16 && back->getStreamDataLength() == 4 && back->getTv() && !back->getSp());
++        auto flags = makeShared<AvtpAafPcmHeader>(*h);
++        flags->setMr(true);
++        flags->setTu(true);
++        flags->setSp(true);
++        flags->setEvt(0x0a);
++        flags->setChannelsPerFrame(0x3ff);
++        flags->setNsr(0x0a);
++        check("aaf-flags", serialize({flags, makeShared<BytesChunk>(samples)}) ==
++              hex("02 89 12 01 0200000001010001 11223344 04 a3ff 10 0004 1a 00 0000 0cf8"));
++        // Malformed PDUs
++        auto reject = [&](const char *name, Bytes pdu, MediaError expected) {
++            check(std::string("reject-") + name, decodeMediaPdu(pdu).error == expected);
++        };
++        Bytes bad = wire; bad[16] = 0x05;               // AES3
++        reject("aaf-aes3", bad, MediaError::AAF_FORMAT_NOT_PCM);
++        bad = wire; bad[17] = 0x50; bad[18] = 0x00;     // 0 channels
++        reject("aaf-no-channels", bad, MediaError::AAF_CHANNELS_ZERO);
++        bad = wire; bad[19] = 17;                       // 17 bits in a 16-bit container
++        reject("aaf-bit-depth", bad, MediaError::AAF_BIT_DEPTH_INVALID);
++        bad = wire; bad[21] = 3; bad.pop_back();         // 3 bytes: not a whole frame
++        reject("aaf-partial-frame", bad, MediaError::AAF_PARTIAL_FRAME);
++        bad = wire; bad[21] = 8;
++        reject("aaf-length", bad, MediaError::DATA_LENGTH_EXCEEDS_PDU);
++        bad = wire; bad[1] = 0x01;
++        reject("aaf-sv0", bad, MediaError::STREAM_ID_NOT_VALID);
++        bad = wire; bad[1] = 0x91;
++        reject("aaf-version1", bad, MediaError::UNSUPPORTED_VERSION);
++        bad = wire; bad[0] = 0x03;                      // CVF
++        reject("cvf-subtype", bad, MediaError::UNSUPPORTED_SUBTYPE);
++        reject("aaf-truncated", Bytes(wire.begin(), wire.begin() + 20), MediaError::PDU_TOO_SHORT);
++        bad = wire; bad[16] = AAF_USER;                 // user-defined format: no PCM container size
++        reject("aaf-user-format", bad, MediaError::AAF_FORMAT_NOT_PCM);
++        // Ethernet padding beyond stream_data_length is ignored.
++        bad = wire; bad.resize(46, 0);
++        check("aaf-ethernet-padding", decodeMediaPdu(bad).samples == samples);
++    }
++
++    void testCrf()
++    {
++        auto c = makeShared<AvtpCrfPdu>();
++        c->setSequenceNum(7);
++        c->setType(CRF_AUDIO_SAMPLE);
++        c->setStreamId(STREAM + 2);
++        c->setBaseFrequency(48000);
++        c->setTimestampInterval(160);
++        c->setCrfTimestampArraySize(2);
++        c->setCrfTimestamp(0, 0x0000000100000000ull);
++        c->setCrfTimestamp(1, 0x0000000100000d05ull);  // + 3333 ns
++        c->setCrfDataLength(16);
++        c->setChunkLength(B(AVTP_CRF_HEADER_BYTES + 16));
++        const Bytes wire = serialize({c});
++        check("crf-golden", wire == hex("04 80 07 01 0200000001010003 0000bb80 0010 00a0 0000000100000000 0000000100000d05"));
++        const DecodedMediaPdu d = decodeMediaPdu(wire);
++        check("crf-decode", d.error == MediaError::NONE && d.crfType == 1 && d.baseFrequency == 48000 && d.pull == 0
++                && d.timestampInterval == 160 && d.crfTimestamps == std::vector<uint64_t>({0x100000000ull, 0x100000d05ull}));
++        auto flags = makeShared<AvtpCrfPdu>(*c);
++        flags->setMr(true);
++        flags->setFs(true);
++        flags->setTu(true);
++        flags->setPull(4);
++        flags->setBaseFrequency(0x1fffffff);
++        check("crf-flags", serialize({flags}) == hex("04 8b 07 01 0200000001010003 9fffffff 0010 00a0 0000000100000000 0000000100000d05"));
++        Packet packet("roundtrip", makeShared<BytesChunk>(wire));
++        const auto& back = packet.peekAtFront<AvtpCrfPdu>();
++        check("crf-deserialize", back->getCrfTimestampArraySize() == 2 && back->getCrfTimestamp(1) == 0x100000d05ull
++                && back->getBaseFrequency() == 48000 && back->getChunkLength() == B(36));
++        Bytes bad = wire; bad[17] = 12;
++        check("reject-crf-length-not-multiple-of-8", decodeMediaPdu(bad).error == MediaError::CRF_DATA_LENGTH_INVALID);
++        bad = wire; bad[17] = 0;
++        check("reject-crf-no-data", decodeMediaPdu(bad).error == MediaError::CRF_DATA_LENGTH_INVALID);
++        bad = wire; bad[14] = 0; bad[15] = 0;
++        check("reject-crf-base-frequency-0", decodeMediaPdu(bad).error == MediaError::CRF_BASE_FREQUENCY_ZERO);
++        bad = wire; bad[12] = 0xc0;
++        check("reject-crf-pull-reserved", decodeMediaPdu(bad).error == MediaError::CRF_PULL_RESERVED);
++        bad = wire; bad[17] = 24;
++        check("reject-crf-length", decodeMediaPdu(bad).error == MediaError::DATA_LENGTH_EXCEEDS_PDU);
++    }
++
++    void test61883()
++    {
++        TsGeneratorConfig config;
++        TsGenerator generator(config);
++        Bytes ts;
++        for (uint64_t i = 0; i <= 5; ++i)
++            ts = generator.packet(i, 0);       // index 5: video without PCR, 4th video packet (CC 3)
++        auto h = makeShared<Avtp61883Header>();
++        h->setSequenceNum(3);
++        h->setStreamId(STREAM + 1);
++        h->setAvtpTimestamp(0xaabbccdd);
++        h->setStreamDataLength(8 + 192);
++        h->setDbc(0x10);
++        Bytes sp = hex("aabbccdd");
++        sp.insert(sp.end(), ts.begin(), ts.end());
++        const Bytes wire = serialize({h, makeShared<BytesChunk>(sp)});
++        Bytes expected = hex("00 81 03 00 0200000001010002 aabbccdd 00000000 00c8 5f a0 3f 06 c4 10 a0 00 00 00");
++        expected.insert(expected.end(), sp.begin(), sp.end());
++        check("61883-4-golden", wire == expected);
++        check("61883-4-ts-packet", ts.size() == 188 && ts[0] == 0x47 && ts[1] == 0x01 && ts[2] == 0x00 && ts[3] == 0x13
++                && ts[4] == 0 && ts[7] == 5 && ts[8] == uint8_t(5 + 8));
++        const DecodedMediaPdu d = decodeMediaPdu(wire);
++        check("61883-4-decode", d.error == MediaError::NONE && d.subtype == 0 && d.tv && d.avtpTimestamp == 0xaabbccdd
++                && d.sid == 63 && d.dbs == 6 && d.fn == 3 && d.qpc == 0 && d.sph && d.dbc == 0x10 && d.fmt == 0x20 && !d.tsf
++                && d.sourcePackets.size() == 1 && d.sourcePackets[0].timestamp == 0xaabbccdd && d.sourcePackets[0].tsPacket == ts);
++        Packet packet("roundtrip", makeShared<BytesChunk>(wire));
++        const auto& back = packet.peekAtFront<Avtp61883Header>();
++        check("61883-4-deserialize", back->isCorrect() && back->getTag() == 1 && back->getChannel() == 31 && back->getTcode() == 0x0a
++                && back->getSid() == 63 && back->getDbs() == 6 && back->getFn() == 3 && back->getSph() && back->getDbc() == 0x10
++                && back->getFmt() == 0x20 && back->getStreamDataLength() == 200);
++        auto flags = makeShared<Avtp61883Header>(*h);
++        flags->setMr(true);
++        flags->setGv(true);
++        flags->setTu(true);
++        flags->setGatewayInfo(0x01020304);
++        flags->setTsf(true);
++        Bytes flagged = hex("00 8b 03 01 0200000001010002 aabbccdd 01020304 00c8 5f a0 3f 06 c4 10 a0 80 00 00");
++        flagged.insert(flagged.end(), sp.begin(), sp.end());
++        check("61883-4-flags", serialize({flags, makeShared<BytesChunk>(sp)}) == flagged);
++        auto reject = [&](const char *name, size_t index, uint8_t value, MediaError error) {
++            Bytes bad = wire;
++            bad[index] = value;
++            check(std::string("reject-61883-") + name, decodeMediaPdu(bad).error == error);
++        };
++        reject("no-cip", 22, 0x1f, MediaError::IEC61883_NO_CIP);
++        reject("channel", 22, 0x5e, MediaError::IEC61883_CHANNEL_NOT_AVTP);
++        reject("tcode", 23, 0x90, MediaError::IEC61883_TCODE);
++        reject("qi1", 24, 0x7f, MediaError::IEC61883_CIP_QUADLET_INDICATOR);
++        reject("qi2", 28, 0x20, MediaError::IEC61883_CIP_QUADLET_INDICATOR);
++        reject("sid", 24, 0x05, MediaError::IEC61883_SID_NOT_AVTP);
++        reject("61883-6-format", 28, 0x90, MediaError::IEC61883_FORMAT_UNSUPPORTED);
++        reject("dbs", 25, 8, MediaError::IEC61883_4_CIP_PARAMETERS);
++        reject("fn", 26, 0x84, MediaError::IEC61883_4_CIP_PARAMETERS);
++        reject("no-sph", 26, 0xc0, MediaError::IEC61883_4_CIP_PARAMETERS);
++        reject("data-length", 21, 0xc4, MediaError::IEC61883_4_DATA_LENGTH);
++        reject("length-exceeds", 21, 0xd0, MediaError::DATA_LENGTH_EXCEEDS_PDU);
++    }
++
++    void testMpegTs()
++    {
++        const Bytes s = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
++        check("crc32-mpeg2-check", crc32Mpeg2(s.data(), s.size()) == 0x0376E6E7u);
++        TsGeneratorConfig config;
++        const Bytes pat = TsGenerator::patSection(config), pmt = TsGenerator::pmtSection(config);
++        check("pat-section", pat.size() == 16 && Bytes(pat.begin(), pat.begin() + 12) == hex("00 b00d 0001 c1 00 00 0001 f000")
++                && crc32Mpeg2(pat.data(), pat.size()) == 0);
++        check("pmt-section", pmt.size() == 26 && Bytes(pmt.begin(), pmt.begin() + 22) == hex("02 b017 0001 c1 00 00 e100 f000 1b e100 f000 0f e110 f000")
++                && crc32Mpeg2(pmt.data(), pmt.size()) == 0);
++        TsGenerator generator(config);
++        const uint64_t pcr = 0x1FFFFFFFFull * 300 + 299;    // largest PCR value
++        Bytes packet;
++        bool ccOk = true;
++        TsPacketInfo last;
++        for (uint64_t i = 0; i <= 400; ++i) {
++            packet = generator.packet(i, pcr);
++            const TsPacketInfo info = parseTsPacket(packet.data());
++            if (i >= 2 && info.pid == config.videoPid && last.pid == config.videoPid)
++                ccOk &= info.continuityCounter == ((last.continuityCounter + 1) & 0x0f);
++            if (info.pid == config.videoPid)
++                last = info;
++        }
++        const TsPacketInfo info = parseTsPacket(packet.data());   // PCR due at 399 (audio slot) moves to video packet 400
++        check("ts-pcr-roundtrip", info.syncOk && info.hasPcr && info.pcr27 == pcr && info.pid == config.videoPid
++                && info.adaptationFieldControl == 3 && info.payloadOffset == 12 && packet[5] == 0x10);
++        check("ts-continuity", ccOk);
++        // Small extension (< 256) and the PCR field bytes written out by hand.
++        TsGenerator small(config);
++        for (uint64_t i = 0; i < 2; ++i)
++            small.packet(i, 0);
++        const Bytes pcrPacket = small.packet(2, 1234567ull * 300 + 17);
++        check("ts-pcr-bytes", Bytes(pcrPacket.begin() + 4, pcrPacket.begin() + 12) == hex("07 10 00 09 6b 43 fe 11")
++                && parseTsPacket(pcrPacket.data()).pcr27 == 1234567ull * 300 + 17);
++        check("ts-pat-packet", generator.packet(1000, 0)[1] == 0x40 && parseTsPacket(generator.packet(2000, 0).data()).pusi);
++
++        // Payload checks stay inside the 188 byte packet for malformed input.
++        TsGenerator fresh(config);
++        const Bytes patPacket = fresh.packet(0, 0);
++        fresh.packet(1, 0);
++        fresh.packet(2, 0);                                     // first PCR packet
++        const Bytes videoPacket = fresh.packet(3, 0);           // plain video packet, payload at byte 4
++        auto psi = [&](const Bytes& ts) { return checkTsPsiPacket(ts, parseTsPacket(ts.data()), pat); };
++        auto es = [](const Bytes& ts) { return checkTsEsPacket(ts, parseTsPacket(ts.data())); };
++        using C = TsPayloadCheck;
++        Bytes t;
++        check("ts-psi-ok", psi(patPacket) == C::OK && es(videoPacket) == C::OK);
++        t = patPacket; t[3] = 0x20 | (t[3] & 0x0f); t[4] = 183;    // adaptation field only
++        check("ts-psi-no-payload", parseTsPacket(t.data()).payloadOffset == 188 && psi(t) == C::PAYLOAD_MISSING);
++        t = patPacket; t[4] = 184;                                 // pointer_field past the packet end
++        check("ts-psi-pointer-outside", psi(t) == C::PAYLOAD_MISSING);
++        t = patPacket; t[7] = 0xff;                                // section_length past the packet end
++        check("ts-psi-length-outside", psi(t) == C::PSI_INVALID);
++        t = patPacket; t[10] ^= 0x01;
++        check("ts-psi-crc", psi(t) == C::PSI_INVALID);
++        check("ts-psi-other-section", checkTsPsiPacket(patPacket, parseTsPacket(patPacket.data()), pmt) == C::MISMATCH);
++        t = videoPacket; t[3] = 0x20 | (t[3] & 0x0f); t[4] = 183;
++        check("ts-es-no-payload", es(t) == C::PAYLOAD_MISSING);
++        t = videoPacket; t[3] = 0x30 | (t[3] & 0x0f); t[4] = 181; t[5] = 0;   // 2 payload bytes left
++        check("ts-es-short-payload", parseTsPacket(t.data()).payloadOffset == 186 && es(t) == C::PAYLOAD_MISSING);
++        t = videoPacket; t[100] ^= 0x01;
++        check("ts-es-mismatch", es(t) == C::MISMATCH);
++        bool pcmOk = true;
++        for (unsigned depth : {8u, 16u, 20u, 24u, 32u})
++            for (size_t container : {size_t(2), size_t(3), size_t(4)}) {
++                if (depth > 8 * container)
++                    continue;
++                for (uint64_t n : {0ull, 1ull, 12345ull, 65535ull, 1ull << 20}) {
++                    const int32_t v = pcmPatternSample(n, 1, depth, 331);
++                    Bytes b;
++                    putPcmSample(b, v, container, depth);
++                    pcmOk &= b.size() == container && getPcmSample(b.data(), container, depth) == v;
++                    pcmOk &= pcmPatternIndex(pcmPatternSample(n, 0, depth, 331), depth, 331) == (n & ((1ull << depth) - 1));
++                }
++            }
++        check("pcm-pattern-roundtrip", pcmOk);
++        Bytes b;
++        putPcmSample(b, -2, 4, 24);      // 24 valid bits left-justified in a 32-bit container
++        check("pcm-24-in-32", b == hex("fffffe00"));
++        check("nsr-codes", nsrToHz(5) == 48000 && nsrToHz(4) == 44100 && nsrToHz(0x0a) == 24000 && hzToNsr(96000) == 7 && hzToNsr(22050) == 0);
++    }
++
++  protected:
++    virtual void initialize() override
++    {
++        testAaf();
++        testCrf();
++        test61883();
++        testMpegTs();
++        std::cout << "AVTP media self-test: " << passed << " passed, " << failed << " failed" << endl;
++    }
++
++    virtual void finish() override
++    {
++        recordScalar("checksPassed", passed);
++        recordScalar("checksFailed", failed);
++    }
++};
++
++Define_Module(AvtpMediaSelfTest);
++
++} // namespace SignalsAndGateways
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaSerializer.cc b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaSerializer.cc
+new file mode 100644
+index 0000000..1d0e9de
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaSerializer.cc
+@@ -0,0 +1,185 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++//
++// Byte-exact serializers for the IEEE 1722 media chunks in AvtpMedia.msg.
++#include "inet/common/packet/serializer/ChunkSerializerRegistry.h"
++#include "inet/common/packet/serializer/FieldsChunkSerializer.h"
++#include "signalsandgateways/inet4/avtp/media/AvtpMedia_m.h"
++
++using namespace inet;
++
++namespace SignalsAndGateways {
++
++class AvtpAafPcmHeaderSerializer : public FieldsChunkSerializer
++{
++  protected:
++    virtual void serialize(MemoryOutputStream& stream, const Ptr<const Chunk>& chunk) const override
++    {
++        const auto& h = staticPtrCast<const AvtpAafPcmHeader>(chunk);
++        if (h->getNsr() > 0x0f || h->getChannelsPerFrame() > 0x3ff || h->getEvt() > 0x0f)
++            throw cRuntimeError("AAF nsr/channels_per_frame/evt exceed their field widths");
++        stream.writeUint8(h->getSubtype());
++        stream.writeUint8((h->getSv() ? 0x80 : 0) | ((h->getVersion() & 7) << 4) | (h->getMr() ? 0x08 : 0) | (h->getTv() ? 0x01 : 0));
++        stream.writeUint8(h->getSequenceNum());
++        stream.writeUint8(h->getTu() ? 0x01 : 0);
++        stream.writeUint64Be(h->getStreamId());
++        stream.writeUint32Be(h->getAvtpTimestamp());
++        stream.writeUint8(h->getFormat());
++        stream.writeUint16Be((h->getNsr() << 12) | h->getChannelsPerFrame());
++        stream.writeUint8(h->getBitDepth());
++        stream.writeUint16Be(h->getStreamDataLength());
++        stream.writeUint8((h->getSp() ? 0x10 : 0) | h->getEvt());
++        stream.writeUint8(0);
++    }
++
++    virtual const Ptr<Chunk> deserialize(MemoryInputStream& stream) const override
++    {
++        auto h = makeShared<AvtpAafPcmHeader>();
++        h->setSubtype(stream.readUint8());
++        const uint8_t flags = stream.readUint8();
++        h->setSv(flags & 0x80);
++        h->setVersion((flags >> 4) & 7);
++        h->setMr(flags & 0x08);
++        h->setTv(flags & 0x01);
++        h->setSequenceNum(stream.readUint8());
++        h->setTu(stream.readUint8() & 0x01);
++        h->setStreamId(stream.readUint64Be());
++        h->setAvtpTimestamp(stream.readUint32Be());
++        h->setFormat(stream.readUint8());
++        const uint16_t word = stream.readUint16Be();
++        h->setNsr(word >> 12);
++        h->setChannelsPerFrame(word & 0x3ff);
++        h->setBitDepth(stream.readUint8());
++        h->setStreamDataLength(stream.readUint16Be());
++        const uint8_t spEvt = stream.readUint8();
++        h->setSp(spEvt & 0x10);
++        h->setEvt(spEvt & 0x0f);
++        stream.readUint8();
++        return h;
++    }
++};
++
++class AvtpCrfPduSerializer : public FieldsChunkSerializer
++{
++  protected:
++    virtual void serialize(MemoryOutputStream& stream, const Ptr<const Chunk>& chunk) const override
++    {
++        const auto& h = staticPtrCast<const AvtpCrfPdu>(chunk);
++        if (h->getPull() > 7 || h->getBaseFrequency() > 0x1fffffff)
++            throw cRuntimeError("CRF pull/base_frequency exceed their field widths");
++        stream.writeUint8(h->getSubtype());
++        stream.writeUint8((h->getSv() ? 0x80 : 0) | ((h->getVersion() & 7) << 4) | (h->getMr() ? 0x08 : 0)
++                          | (h->getFs() ? 0x02 : 0) | (h->getTu() ? 0x01 : 0));
++        stream.writeUint8(h->getSequenceNum());
++        stream.writeUint8(h->getType());
++        stream.writeUint64Be(h->getStreamId());
++        stream.writeUint32Be((uint32_t(h->getPull()) << 29) | h->getBaseFrequency());
++        stream.writeUint16Be(h->getCrfDataLength());
++        stream.writeUint16Be(h->getTimestampInterval());
++        for (size_t i = 0; i < h->getCrfTimestampArraySize(); ++i)
++            stream.writeUint64Be(h->getCrfTimestamp(i));
++    }
++
++    virtual const Ptr<Chunk> deserialize(MemoryInputStream& stream) const override
++    {
++        auto h = makeShared<AvtpCrfPdu>();
++        h->setSubtype(stream.readUint8());
++        const uint8_t flags = stream.readUint8();
++        h->setSv(flags & 0x80);
++        h->setVersion((flags >> 4) & 7);
++        h->setMr(flags & 0x08);
++        h->setFs(flags & 0x02);
++        h->setTu(flags & 0x01);
++        h->setSequenceNum(stream.readUint8());
++        h->setType(stream.readUint8());
++        h->setStreamId(stream.readUint64Be());
++        const uint32_t word = stream.readUint32Be();
++        h->setPull(word >> 29);
++        h->setBaseFrequency(word & 0x1fffffff);
++        h->setCrfDataLength(stream.readUint16Be());
++        h->setTimestampInterval(stream.readUint16Be());
++        const size_t count = h->getCrfDataLength() / 8;
++        h->setCrfTimestampArraySize(count);
++        for (size_t i = 0; i < count && stream.getRemainingLength() >= B(8); ++i)
++            h->setCrfTimestamp(i, stream.readUint64Be());
++        h->setChunkLength(B(AVTP_CRF_HEADER_BYTES + 8 * count));
++        return h;
++    }
++};
++
++class Avtp61883HeaderSerializer : public FieldsChunkSerializer
++{
++  protected:
++    virtual void serialize(MemoryOutputStream& stream, const Ptr<const Chunk>& chunk) const override
++    {
++        const auto& h = staticPtrCast<const Avtp61883Header>(chunk);
++        if (h->getTag() > 3 || h->getChannel() > 0x3f || h->getTcode() > 0x0f || h->getSy() > 0x0f
++                || h->getSid() > 0x3f || h->getFn() > 3 || h->getQpc() > 7 || h->getFmt() > 0x3f)
++            throw cRuntimeError("61883/CIP header fields exceed their widths");
++        stream.writeUint8(h->getSubtype());
++        stream.writeUint8((h->getSv() ? 0x80 : 0) | ((h->getVersion() & 7) << 4) | (h->getMr() ? 0x08 : 0)
++                          | (h->getGv() ? 0x02 : 0) | (h->getTv() ? 0x01 : 0));
++        stream.writeUint8(h->getSequenceNum());
++        stream.writeUint8(h->getTu() ? 0x01 : 0);
++        stream.writeUint64Be(h->getStreamId());
++        stream.writeUint32Be(h->getAvtpTimestamp());
++        stream.writeUint32Be(h->getGatewayInfo());
++        stream.writeUint16Be(h->getStreamDataLength());
++        stream.writeUint8((h->getTag() << 6) | h->getChannel());
++        stream.writeUint8((h->getTcode() << 4) | h->getSy());
++        // CIP header (IEC 61883-1)
++        stream.writeUint8(h->getSid());                      // qi1 = 00
++        stream.writeUint8(h->getDbs());
++        stream.writeUint8((h->getFn() << 6) | (h->getQpc() << 3) | (h->getSph() ? 0x04 : 0));
++        stream.writeUint8(h->getDbc());
++        stream.writeUint8(0x80 | h->getFmt());               // qi2 = 10
++        stream.writeUint8(h->getTsf() ? 0x80 : 0);           // FDF: TSF + 23 reserved bits
++        stream.writeUint16Be(0);
++    }
++
++    virtual const Ptr<Chunk> deserialize(MemoryInputStream& stream) const override
++    {
++        auto h = makeShared<Avtp61883Header>();
++        h->setSubtype(stream.readUint8());
++        const uint8_t flags = stream.readUint8();
++        h->setSv(flags & 0x80);
++        h->setVersion((flags >> 4) & 7);
++        h->setMr(flags & 0x08);
++        h->setGv(flags & 0x02);
++        h->setTv(flags & 0x01);
++        h->setSequenceNum(stream.readUint8());
++        h->setTu(stream.readUint8() & 0x01);
++        h->setStreamId(stream.readUint64Be());
++        h->setAvtpTimestamp(stream.readUint32Be());
++        h->setGatewayInfo(stream.readUint32Be());
++        h->setStreamDataLength(stream.readUint16Be());
++        const uint8_t tagChannel = stream.readUint8();
++        h->setTag(tagChannel >> 6);
++        h->setChannel(tagChannel & 0x3f);
++        const uint8_t tcodeSy = stream.readUint8();
++        h->setTcode(tcodeSy >> 4);
++        h->setSy(tcodeSy & 0x0f);
++        const uint8_t sid = stream.readUint8();
++        if (sid >> 6)
++            h->markIncorrect();
++        h->setSid(sid & 0x3f);
++        h->setDbs(stream.readUint8());
++        const uint8_t fnQpcSph = stream.readUint8();
++        h->setFn(fnQpcSph >> 6);
++        h->setQpc((fnQpcSph >> 3) & 7);
++        h->setSph(fnQpcSph & 0x04);
++        h->setDbc(stream.readUint8());
++        const uint8_t fmt = stream.readUint8();
++        if ((fmt >> 6) != 2)
++            h->markIncorrect();
++        h->setFmt(fmt & 0x3f);
++        h->setTsf(stream.readUint8() & 0x80);
++        stream.readUint16Be();
++        return h;
++    }
++};
++
++Register_Serializer(AvtpAafPcmHeader, AvtpAafPcmHeaderSerializer);
++Register_Serializer(AvtpCrfPdu, AvtpCrfPduSerializer);
++Register_Serializer(Avtp61883Header, Avtp61883HeaderSerializer);
++
++} // namespace SignalsAndGateways
+diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/package.ned b/src-inet4/signalsandgateways/inet4/avtp/media/package.ned
+new file mode 100644
+index 0000000..36383e2
+--- /dev/null
++++ b/src-inet4/signalsandgateways/inet4/avtp/media/package.ned
+@@ -0,0 +1,2 @@
++// SPDX-License-Identifier: LGPL-3.0-or-later
++package signalsandgateways.inet4.avtp.media;
 diff --git a/src-inet4/signalsandgateways/inet4/avtp/package.ned b/src-inet4/signalsandgateways/inet4/avtp/package.ned
 new file mode 100644
 index 0000000..d3c4e13
