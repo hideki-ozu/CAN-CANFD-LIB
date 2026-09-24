@@ -53,7 +53,7 @@ ERROR_COUNTERS = ('sequenceLost', 'sequenceOutOfOrder', 'droppedMalformedPdus', 
                   'latePresentations', 'droppedLate')
 CONTENT_COUNTERS = {
     'aaf': ('sampleErrors', 'sampleGaps', 'formatChanges', 'timestampInvalid'),
-    'ts': ('syncErrors', 'continuityErrors', 'psiCrcErrors', 'payloadErrors', 'unknownPid', 'dbcErrors'),
+    'ts': ('syncErrors', 'continuityErrors', 'psiCrcErrors', 'payloadErrors', 'payloadMissing', 'unknownPid', 'dbcErrors'),
     'crf': ('crfNonMonotonic', 'crfParameterChanges', 'crfLateTimestamps'),
 }
 
@@ -386,7 +386,7 @@ def main():
     sca = next(selftest_dir.glob('*.sca')).read_text()
     passed = int(float(next(l.split()[-1] for l in sca.splitlines() if ' checksPassed ' in l)))
     failed = int(float(next(l.split()[-1] for l in sca.splitlines() if ' checksFailed ' in l)))
-    assert failed == 0 and passed >= 49, completed.stdout[-4000:]
+    assert failed == 0 and passed >= 60, completed.stdout[-4000:]
     report['codec_selftest'] = {'passed': passed, 'failed': failed}
 
     for config, (tsn, _, _) in CONFIGS.items():

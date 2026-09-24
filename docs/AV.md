@@ -87,11 +87,11 @@ python3 tests/test_av.py             # AVストリームの検証（make test-av
 | `Iec61883TsTalker` | `psiIntervalPackets` / `pcrIntervalPackets` / `audioEveryPackets` | 1000 / 397 / 10 | 合成TSの構成 |
 | `CrfTalker` | `baseFrequency` / `pull` / `timestampInterval` / `timestampsPerPdu` / `timestampOffset` | 48kHz / 0 / 160 / 6 / `maxTransitTime` | CRF |
 
-スカラー結果（listener）: `avtpPdusReceived`、`sequenceLost`、`latePresentations`、`droppedStreamId`、`droppedMalformedPdus` など共通の計数に加え、AAFは `samplesPlayed`・`sampleErrors`・`sampleGaps`・`recoveredRatePpm`（タイムスタンプから求めたサンプルレート）・`playoutRatePpm`（実際の再生速度）・`timestampJitterMax`、TSは `tsPacketsOutput`・`continuityErrors`・`psiCrcErrors`・`payloadErrors`・`dbcErrors`・`pcrJitterMax`・`recoveredSystemClockPpm`・`outputSystemClockPpm`、CRFは `recoveredMediaClockPpm`・`regeneratedMediaClockPpm`（再生成したクロックの実速度）・`crfTimestampJitterMax`・`crfLateTimestamps`。talkerは `productionRatePpm` 等（実際の生成速度）。`*RatePpm`・`*ClockPpm` のうち「実際の」値はシミュレーション時刻（物理時間）に対する値です。統計: `presentationError`（listenerの出力時刻 − talkerが意図した提示時刻）、`presentationSlack`、`presentationLateness`。
+スカラー結果（listener）: `avtpPdusReceived`、`sequenceLost`、`latePresentations`、`droppedStreamId`、`droppedMalformedPdus` など共通の計数に加え、AAFは `samplesPlayed`・`sampleErrors`・`sampleGaps`・`recoveredRatePpm`（タイムスタンプから求めたサンプルレート）・`playoutRatePpm`（実際の再生速度）・`timestampJitterMax`、TSは `tsPacketsOutput`・`continuityErrors`・`psiCrcErrors`（sectionの長さまたはCRCの誤り）・`payloadErrors`・`payloadMissing`（PAT/PMTや映像・音声のPIDなのに必要なペイロードがパケット内にない）・`dbcErrors`・`pcrJitterMax`・`recoveredSystemClockPpm`・`outputSystemClockPpm`、CRFは `recoveredMediaClockPpm`・`regeneratedMediaClockPpm`（再生成したクロックの実速度）・`crfTimestampJitterMax`・`crfLateTimestamps`。talkerは `productionRatePpm` 等（実際の生成速度）。`*RatePpm`・`*ClockPpm` のうち「実際の」値はシミュレーション時刻（物理時間）に対する値です。統計: `presentationError`（listenerの出力時刻 − talkerが意図した提示時刻）、`presentationSlack`、`presentationLateness`。
 
 ## 検証（`tests/test_av.py`）
 
-1. **コーデック自己試験（50項目）**: 仕様表から手計算したAAF・CRF・61883-4のバイト列（全フラグ、CIPヘッダ、ソースパケット）とserializer出力の一致、INETでの逆変換、不正PDU 26種の拒否（AES3、チャネル0、ビット長、端数フレーム、長さ超過、sv=0、version、CVF、CRFの長さ・周波数0・予約pull、CIPのtag・channel・tcode・qi・SID・61883-6・DBS・FN・SPH・長さ）、CRC-32/MPEG-2のチェック値、PAT/PMT、PCRの符号化、PCMパターンの往復。
+1. **コーデック自己試験（60項目）**: 仕様表から手計算したAAF・CRF・61883-4のバイト列（全フラグ、CIPヘッダ、ソースパケット）とserializer出力の一致、INETでの逆変換、不正PDU 27種の拒否（AES3、ユーザ定義形式（format 0）、チャネル0、ビット長、端数フレーム、長さ超過、sv=0、version、CVF、CRFの長さ・周波数0・予約pull、CIPのtag・channel・tcode・qi・SID・61883-6・DBS・FN・SPH・長さ）、CRC-32/MPEG-2のチェック値、PAT/PMT、PCRの符号化、PCMパターンの往復、不正なTSパケット（ペイロードなしのアダプテーションフィールドのみ、パケット外を指すpointer_field・section_length、4バイト未満のペイロード、CRC誤り、内容の不一致）の分類。
 2. **ネットワーク4構成**（理想・TSN・TSN+gPTP・同期なし）: 全listenerで欠落・順序異常・不正PDU・遅延到着・内容の誤り・CC誤り・PSIのCRC誤り・DBC不連続が0。TSは送信済みで提示時刻を過ぎた全パケットを出力、PCRジッタは5ns未満。
 3. **メディアクロック**（下表）: タイムスタンプに載る速度は常に+25ppm。実際の生成速度はチューナの発振器分（+50ppm）を加えた+75ppmで、gPTP同期時は全listenerが1ppm以内の速度で再生・出力します。同期なしでは、listenerは自分のクロックで提示するため速度がずれます（ヘッドユニット−25ppm＝生成に対し−100ppm、後席+55ppm）。
 4. **ワイヤ検証**（`AvBasic`・`AvTsnGptp`）: チューナのpcapの全PDUを検査します。AAFとCRFは **Open1722参照実装**（`tests/av/open1722_media_decode.c`）と独立のPythonパーサの両方でデコードし、全フィールドの一致、`IsValid`、予約ビット0、連番、サンプル値、タイムスタンプ間隔（メディアクロックどおり、±1ns）を確認します。61883-4はOpen1722に対応がないため、Wireshark・OpenAvnuと同じ配置で書いたPythonパーサで、CIPヘッダの全フィールド、DBC、SPHの間隔、TSのsync・CC・PAT/PMT（CRCと内容）・PCR（値と間隔）・ペイロード・パケット番号の連続を確認します。TSN構成では802.1QタグがPCP 3（音声・CRF）／PCP 2（TV）、VID 2であること、後席にTVだけが届くことを確認します。受信側のpcapは送信側とバイト一致します。
@@ -113,7 +113,7 @@ serializerとtalkerを故意に誤らせる変異試験（AAFのnsr位置、CIP�
 
 - **仕様本文との照合**: フィールド配置は上記の参照実装と照合済みですが、次はIEEE 1722本文と照合していません（**要確認**）。AAFの `avtp_timestamp` を先頭サンプルの提示時刻とする点、61883-4のSPHを各ソースパケットの提示時刻（gPTP nsの下位32bit）とする点（OpenAvnuと同じ扱い）、CRFタイムスタンプに提示時刻オフセットを加える点。
 - **データは合成**: 実際の放送TS・音声ファイルの入力はありません。TSは構文上正しいPAT/PMT/PCRを持ちますが、映像・音声のPESやES（H.264、AAC）は中身のない試験パターンです。デコード・画面表示・音声出力のモデルはありません。
-- **未対応の形式**: AAFのAES3、sparseタイムスタンプ（`sp`=1）、IEC 61883-6（音声）、CVF（H.264等の圧縮映像）、RVF（非圧縮映像）、IIDC、AVTP over UDP。デジタルラジオはデコード後の音声をAAFで送る想定で、DAB等の放送固有形式（ETI等）はありません。
+- **未対応の形式**: AAFのAES3とユーザ定義形式（format 0。PCMの容器長がないため `AAF_FORMAT_NOT_PCM` として破棄）、sparseタイムスタンプ（`sp`=1）、IEC 61883-6（音声）、CVF（H.264等の圧縮映像）、RVF（非圧縮映像）、IIDC、AVTP over UDP。デジタルラジオはデコード後の音声をAAFで送る想定で、DAB等の放送固有形式（ETI等）はありません。
 - **ストリーム管理**: IEEE 1722.1（AVDECC）による発見・接続、MAAP、SRP/MSRPによる帯域予約はありません。宛先MAC・stream_id・スイッチのシェーパとマルチキャスト転送は静的設定です（[AVTP.md](AVTP.md#未対応事項モデルの前提)と同じ）。
 - **クロック回復**: listenerは受信したタイムスタンプを自分のgPTPクロック上の時刻としてそのまま使います。PLL等によるメディアクロックの平滑化や、CRFからAAFの再生クロックを生成する連携はありません（CRF listenerは再生成クロックの速度を計算するだけです）。
 - **バッファ**: 再生バッファの容量やアンダーラン／オーバーランのモデルはありません。同期なし構成の速度差は、提示時刻誤差の増加と速度の計数で示します。

@@ -2549,10 +2549,10 @@ index 0000000..42f419a
 +}
 diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaApps.cc b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaApps.cc
 new file mode 100644
-index 0000000..bd9205e
+index 0000000..696a46d
 --- /dev/null
 +++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaApps.cc
-@@ -0,0 +1,947 @@
+@@ -0,0 +1,934 @@
 +// SPDX-License-Identifier: LGPL-3.0-or-later
 +//
 +// IEEE 1722 media streams for digital radio / TV transport: AAF PCM audio,
@@ -3226,7 +3226,7 @@ index 0000000..bd9205e
 +    uint8_t expectedDbc = 0;
 +    std::map<uint16_t, uint8_t> lastCc;
 +    long tsPackets = 0, syncErrors = 0, ccErrors = 0, psiCrcErrors = 0, patCount = 0, pmtCount = 0;
-+    long payloadErrors = 0, dbcErrors = 0, pcrCount = 0, unknownPid = 0;
++    long payloadErrors = 0, payloadMissing = 0, dbcErrors = 0, pcrCount = 0, unknownPid = 0;
 +    LinearFit pcrFit, outputFit;   // PCR against the listener clock / simulation time at output
 +    simsignal_t tsSignal;
 +
@@ -3259,17 +3259,14 @@ index 0000000..bd9205e
 +        }
 +    }
 +
-+    bool checkSection(const Bytes& ts, const TsPacketInfo& info)
++    void count(TsPayloadCheck result)
 +    {
-+        // pointer_field 0, then one section: table_id, section_length, ..., CRC_32.
-+        const size_t start = info.payloadOffset + 1 + ts[info.payloadOffset];
-+        if (start + 3 > ts.size())
-+            return false;
-+        const size_t length = ((ts[start + 1] & 0x0f) << 8) | ts[start + 2];
-+        if (start + 3 + length > ts.size() || length < 4)
-+            return false;
-+        // The CRC over the whole section including CRC_32 is zero.
-+        return crc32Mpeg2(ts.data() + start, 3 + length) == 0;
++        switch (result) {
++            case TsPayloadCheck::OK: break;
++            case TsPayloadCheck::PAYLOAD_MISSING: ++payloadMissing; break;
++            case TsPayloadCheck::PSI_INVALID: ++psiCrcErrors; break;
++            case TsPayloadCheck::MISMATCH: ++payloadErrors; break;
++        }
 +    }
 +
 +    virtual void onPresentation(cMessage *message) override
@@ -3299,21 +3296,10 @@ index 0000000..bd9205e
 +        if (info.pid == 0x0000 || info.pid == config.pmtPid) {
 +            (info.pid == 0 ? patCount : pmtCount)++;
 +            const Bytes expected = info.pid == 0 ? TsGenerator::patSection(config) : TsGenerator::pmtSection(config);
-+            const size_t start = info.payloadOffset + 1;
-+            if (!checkSection(ts, info))
-+                ++psiCrcErrors;
-+            else if (!std::equal(expected.begin(), expected.end(), ts.begin() + start))
-+                ++payloadErrors;
++            count(checkTsPsiPacket(ts, info, expected));
 +        }
-+        else if (info.pid == config.videoPid || info.pid == config.audioPid) {
-+            const uint8_t *p = ts.data() + info.payloadOffset;
-+            const uint32_t index = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
-+            for (size_t j = info.payloadOffset + 4; j < ts.size(); ++j)
-+                if (ts[j] != uint8_t(index + j)) {
-+                    ++payloadErrors;
-+                    break;
-+                }
-+        }
++        else if (info.pid == config.videoPid || info.pid == config.audioPid)
++            count(checkTsEsPacket(ts, info));
 +        else
 +            ++unknownPid;
 +        delete output;
@@ -3329,6 +3315,7 @@ index 0000000..bd9205e
 +        recordScalar("patReceived", patCount);
 +        recordScalar("pmtReceived", pmtCount);
 +        recordScalar("payloadErrors", payloadErrors);
++        recordScalar("payloadMissing", payloadMissing);
 +        recordScalar("unknownPid", unknownPid);
 +        recordScalar("dbcErrors", dbcErrors);
 +        recordScalar("pcrReceived", pcrCount);
@@ -3502,12 +3489,14 @@ index 0000000..bd9205e
 +} // namespace SignalsAndGateways
 diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.cc b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.cc
 new file mode 100644
-index 0000000..537cf19
+index 0000000..fe8c7b6
 --- /dev/null
 +++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.cc
-@@ -0,0 +1,377 @@
+@@ -0,0 +1,410 @@
 +// SPDX-License-Identifier: LGPL-3.0-or-later
 +#include "signalsandgateways/inet4/avtp/media/AvtpMediaCodec.h"
++
++#include <algorithm>
 +
 +namespace SignalsAndGateways {
 +namespace avtp {
@@ -3538,14 +3527,14 @@ index 0000000..537cf19
 +    out.evt = p[22] & 0x0f;
 +    if (AAF_HEADER + length > size)
 +        out.error = MediaError::DATA_LENGTH_EXCEEDS_PDU;
-+    else if (out.format > AAF_INT_16BIT)
-+        out.error = MediaError::AAF_FORMAT_NOT_PCM;
++    else if (out.format == AAF_USER || out.format > AAF_INT_16BIT)
++        out.error = MediaError::AAF_FORMAT_NOT_PCM;     // user-defined (0) has no PCM container size
 +    else if (out.channelsPerFrame == 0)
 +        out.error = MediaError::AAF_CHANNELS_ZERO;
 +    else if (out.bitDepth == 0 || (out.format == AAF_FLOAT_32BIT && out.bitDepth != 32)
-+             || (out.format != AAF_USER && out.bitDepth > 8 * aafContainerBytes(out.format)))
++             || out.bitDepth > 8 * aafContainerBytes(out.format))
 +        out.error = MediaError::AAF_BIT_DEPTH_INVALID;
-+    else if (out.format != AAF_USER && length % (out.channelsPerFrame * aafContainerBytes(out.format)) != 0)
++    else if (length % (out.channelsPerFrame * aafContainerBytes(out.format)) != 0)
 +        out.error = MediaError::AAF_PARTIAL_FRAME;
 +    else
 +        out.samples.assign(p + AAF_HEADER, p + AAF_HEADER + length);
@@ -3813,6 +3802,37 @@ index 0000000..537cf19
 +    return info;
 +}
 +
++TsPayloadCheck checkTsPsiPacket(const Bytes& ts, const TsPacketInfo& info, const Bytes& expectedSection)
++{
++    // pointer_field, then one section: table_id, section_length, ..., CRC_32.
++    if (info.payloadOffset >= ts.size())
++        return TsPayloadCheck::PAYLOAD_MISSING;
++    const size_t start = info.payloadOffset + 1 + ts[info.payloadOffset];
++    if (start + 3 > ts.size())
++        return TsPayloadCheck::PAYLOAD_MISSING;
++    const size_t length = 3 + (((ts[start + 1] & 0x0f) << 8) | ts[start + 2]);
++    if (length < 3 + 4 || start + length > ts.size())
++        return TsPayloadCheck::PSI_INVALID;
++    // The CRC over the whole section including CRC_32 is zero.
++    if (crc32Mpeg2(ts.data() + start, length) != 0)
++        return TsPayloadCheck::PSI_INVALID;
++    if (length != expectedSection.size() || !std::equal(expectedSection.begin(), expectedSection.end(), ts.begin() + start))
++        return TsPayloadCheck::MISMATCH;
++    return TsPayloadCheck::OK;
++}
++
++TsPayloadCheck checkTsEsPacket(const Bytes& ts, const TsPacketInfo& info)
++{
++    // 4 byte packet index, then (index + byte offset) & 0xFF up to the end of the packet.
++    if (info.payloadOffset + 4 > ts.size())
++        return TsPayloadCheck::PAYLOAD_MISSING;
++    const uint32_t index = be32(ts.data() + info.payloadOffset);
++    for (size_t j = info.payloadOffset + 4; j < ts.size(); ++j)
++        if (ts[j] != uint8_t(index + j))
++            return TsPayloadCheck::MISMATCH;
++    return TsPayloadCheck::OK;
++}
++
 +Bytes TsGenerator::patSection(const TsGeneratorConfig& c)
 +{
 +    Bytes s = {0x00, 0xB0, 0x0D, uint8_t(c.transportStreamId >> 8), uint8_t(c.transportStreamId), 0xC1, 0x00, 0x00,
@@ -3885,10 +3905,10 @@ index 0000000..537cf19
 +} // namespace SignalsAndGateways
 diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.h b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.h
 new file mode 100644
-index 0000000..670c0c6
+index 0000000..9dd081d
 --- /dev/null
 +++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaCodec.h
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,157 @@
 +// SPDX-License-Identifier: LGPL-3.0-or-later
 +//
 +// Validating byte-level decoder for IEEE 1722-2016 AAF (PCM), CRF and 61883/IIDC
@@ -4003,6 +4023,15 @@ index 0000000..670c0c6
 +};
 +TsPacketInfo parseTsPacket(const uint8_t *packet);
 +
++// Payload checks of one received TS packet against the TsGenerator stream. All reads stay
++// inside 'ts'; a packet without the needed payload (adaptation field only, pointer_field or
++// section header outside the packet, ES payload < 4 bytes) is PAYLOAD_MISSING.
++enum class TsPayloadCheck { OK, PAYLOAD_MISSING, PSI_INVALID, MISMATCH };
++// PAT/PMT: one complete section with valid section_length and CRC_32, equal to 'expectedSection'.
++TsPayloadCheck checkTsPsiPacket(const Bytes& ts, const TsPacketInfo& info, const Bytes& expectedSection);
++// Video/audio: packet index in the first 4 payload bytes, then the byte pattern.
++TsPayloadCheck checkTsEsPacket(const Bytes& ts, const TsPacketInfo& info);
++
 +struct TsGeneratorConfig {
 +    uint16_t transportStreamId = 1;
 +    uint16_t programNumber = 1;
@@ -4039,10 +4068,10 @@ index 0000000..670c0c6
 +#endif
 diff --git a/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaSelfTest.cc b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaSelfTest.cc
 new file mode 100644
-index 0000000..ca54e60
+index 0000000..39d89fe
 --- /dev/null
 +++ b/src-inet4/signalsandgateways/inet4/avtp/media/AvtpMediaSelfTest.cc
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,316 @@
 +// SPDX-License-Identifier: LGPL-3.0-or-later
 +//
 +// Golden vectors for AAF PCM, CRF and IEC 61883-4 were written by hand from the
@@ -4151,6 +4180,8 @@ index 0000000..ca54e60
 +        bad = wire; bad[0] = 0x03;                      // CVF
 +        reject("cvf-subtype", bad, MediaError::UNSUPPORTED_SUBTYPE);
 +        reject("aaf-truncated", Bytes(wire.begin(), wire.begin() + 20), MediaError::PDU_TOO_SHORT);
++        bad = wire; bad[16] = AAF_USER;                 // user-defined format: no PCM container size
++        reject("aaf-user-format", bad, MediaError::AAF_FORMAT_NOT_PCM);
 +        // Ethernet padding beyond stream_data_length is ignored.
 +        bad = wire; bad.resize(46, 0);
 +        check("aaf-ethernet-padding", decodeMediaPdu(bad).samples == samples);
@@ -4290,6 +4321,33 @@ index 0000000..ca54e60
 +        check("ts-pcr-bytes", Bytes(pcrPacket.begin() + 4, pcrPacket.begin() + 12) == hex("07 10 00 09 6b 43 fe 11")
 +                && parseTsPacket(pcrPacket.data()).pcr27 == 1234567ull * 300 + 17);
 +        check("ts-pat-packet", generator.packet(1000, 0)[1] == 0x40 && parseTsPacket(generator.packet(2000, 0).data()).pusi);
++
++        // Payload checks stay inside the 188 byte packet for malformed input.
++        TsGenerator fresh(config);
++        const Bytes patPacket = fresh.packet(0, 0);
++        fresh.packet(1, 0);
++        fresh.packet(2, 0);                                     // first PCR packet
++        const Bytes videoPacket = fresh.packet(3, 0);           // plain video packet, payload at byte 4
++        auto psi = [&](const Bytes& ts) { return checkTsPsiPacket(ts, parseTsPacket(ts.data()), pat); };
++        auto es = [](const Bytes& ts) { return checkTsEsPacket(ts, parseTsPacket(ts.data())); };
++        using C = TsPayloadCheck;
++        Bytes t;
++        check("ts-psi-ok", psi(patPacket) == C::OK && es(videoPacket) == C::OK);
++        t = patPacket; t[3] = 0x20 | (t[3] & 0x0f); t[4] = 183;    // adaptation field only
++        check("ts-psi-no-payload", parseTsPacket(t.data()).payloadOffset == 188 && psi(t) == C::PAYLOAD_MISSING);
++        t = patPacket; t[4] = 184;                                 // pointer_field past the packet end
++        check("ts-psi-pointer-outside", psi(t) == C::PAYLOAD_MISSING);
++        t = patPacket; t[7] = 0xff;                                // section_length past the packet end
++        check("ts-psi-length-outside", psi(t) == C::PSI_INVALID);
++        t = patPacket; t[10] ^= 0x01;
++        check("ts-psi-crc", psi(t) == C::PSI_INVALID);
++        check("ts-psi-other-section", checkTsPsiPacket(patPacket, parseTsPacket(patPacket.data()), pmt) == C::MISMATCH);
++        t = videoPacket; t[3] = 0x20 | (t[3] & 0x0f); t[4] = 183;
++        check("ts-es-no-payload", es(t) == C::PAYLOAD_MISSING);
++        t = videoPacket; t[3] = 0x30 | (t[3] & 0x0f); t[4] = 181; t[5] = 0;   // 2 payload bytes left
++        check("ts-es-short-payload", parseTsPacket(t.data()).payloadOffset == 186 && es(t) == C::PAYLOAD_MISSING);
++        t = videoPacket; t[100] ^= 0x01;
++        check("ts-es-mismatch", es(t) == C::MISMATCH);
 +        bool pcmOk = true;
 +        for (unsigned depth : {8u, 16u, 20u, 24u, 32u})
 +            for (size_t container : {size_t(2), size_t(3), size_t(4)}) {
