@@ -3399,10 +3399,10 @@ index 0000000..272f218
 +#endif /* SOA4CORE_DISCOVERY_SOMEIP_EXTRACTEDQOSOPTIONS_H_ */
 diff --git a/src-inet4/soa4core/discovery/someip/SomeIpSD.cc b/src-inet4/soa4core/discovery/someip/SomeIpSD.cc
 new file mode 100644
-index 0000000..e9b15ef
+index 0000000..89f7106
 --- /dev/null
 +++ b/src-inet4/soa4core/discovery/someip/SomeIpSD.cc
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,399 @@
 +//
 +// c Mehmet Mueller for HAW Hamburg
 +//
@@ -3619,15 +3619,21 @@ index 0000000..e9b15ef
 +    }
 +}
 +
-+bool SomeIpSD::getFirstOptions(const SomeIpSDEntry& entry, const SomeIpSDHeader& header, vector<const SomeIpSDOption*>& options) {
-+    const size_t first = entry.getIndex1stOptions();
-+    const size_t count = entry.getNum1stOptions();
-+    if (first + count > header.getOptionsArraySize()) {
-+        ++_numInvalidOptionReferences;
-+        return false;
++bool SomeIpSD::getReferencedOptions(const SomeIpSDEntry& entry, const SomeIpSDHeader& header, vector<const SomeIpSDOption*>& options) {
++    // [PRS_SOMEIPSD_00341]: an entry references up to two option runs; a run with zero options has no index
++    const size_t runs[2][2] = {
++        { entry.getIndex1stOptions(), entry.getNum1stOptions() },
++        { entry.getIndex2ndOptions(), entry.getNum2ndOptions() },
++    };
++    for (const auto& run : runs) {
++        if (run[1] != 0 && run[0] + run[1] > header.getOptionsArraySize()) {
++            ++_numInvalidOptionReferences;
++            return false;
++        }
 +    }
-+    for (size_t i = first; i < first + count; ++i)
-+        options.push_back(&header.getOptions(i));
++    for (const auto& run : runs)
++        for (size_t i = run[0]; i < run[0] + run[1]; ++i)
++            options.push_back(&header.getOptions(i));
 +    return true;
 +}
 +
@@ -3648,7 +3654,7 @@ index 0000000..e9b15ef
 +
 +void SomeIpSD::processOfferEntry(const SomeIpSDEntry& entry, const SomeIpSDHeader& header, const L3Address& source) {
 +    vector<const SomeIpSDOption*> options;
-+    if (!getFirstOptions(entry, header, options))
++    if (!getReferencedOptions(entry, header, options))
 +        return;
 +    SomeIpDiscoveryNotification* notification = new SomeIpDiscoveryNotification();
 +    notification->setServiceId(entry.getServiceId());
@@ -3672,7 +3678,7 @@ index 0000000..e9b15ef
 +
 +void SomeIpSD::processSubscribeEventGroupEntry(const SomeIpSDEntry& entry, const SomeIpSDHeader& header, const L3Address& source) {
 +    vector<const SomeIpSDOption*> options;
-+    if (!getFirstOptions(entry, header, options))
++    if (!getReferencedOptions(entry, header, options))
 +        return;
 +    for (const SomeIpSDOption* option : options) {
 +        if (!isIpv4EndpointLikeOption(*option))
@@ -3691,7 +3697,7 @@ index 0000000..e9b15ef
 +
 +void SomeIpSD::processSubscribeEventGroupAckEntry(const SomeIpSDEntry& entry, const SomeIpSDHeader& header, const L3Address& source) {
 +    vector<const SomeIpSDOption*> options;
-+    if (!getFirstOptions(entry, header, options))
++    if (!getReferencedOptions(entry, header, options))
 +        return;
 +    SomeIpDiscoveryNotification* notification = new SomeIpDiscoveryNotification();
 +    notification->setServiceId(entry.getServiceId());
@@ -3798,7 +3804,7 @@ index 0000000..e9b15ef
 +} /* end namespace SOA4CoRE */
 diff --git a/src-inet4/soa4core/discovery/someip/SomeIpSD.h b/src-inet4/soa4core/discovery/someip/SomeIpSD.h
 new file mode 100644
-index 0000000..5127db2
+index 0000000..0c400cd
 --- /dev/null
 +++ b/src-inet4/soa4core/discovery/someip/SomeIpSD.h
 @@ -0,0 +1,100 @@
@@ -3867,8 +3873,8 @@ index 0000000..5127db2
 +    void processAcknowledgment(cObject *obj);
 +    void processSubscribeEventGroupEntry(const SomeIpSDEntry& entry, const SomeIpSDHeader& header, const inet::L3Address& source);
 +    void processSubscribeEventGroupAckEntry(const SomeIpSDEntry& entry, const SomeIpSDHeader& header, const inet::L3Address& source);
-+    // Options referenced by the first option run of an entry; false if the reference is out of range.
-+    bool getFirstOptions(const SomeIpSDEntry& entry, const SomeIpSDHeader& header, std::vector<const SomeIpSDOption*>& options);
++    // Options referenced by both option runs of an entry; false if either reference is out of range.
++    bool getReferencedOptions(const SomeIpSDEntry& entry, const SomeIpSDHeader& header, std::vector<const SomeIpSDOption*>& options);
 +    SomeIpSDEntry createEntry(SomeIpSDEntryType type, uint16_t serviceId, uint16_t instanceId, int numOptions);
 +    SomeIpSDOption createIpv4Endpoint(SomeIpDiscoveryNotification* someIpDiscoveryNotification, QoSGroup qosGroup = QoSGroup::UNDEFINED);
 +    void sendTo(inet::Ptr<SomeIpSDHeader> header, const char *name, inet::L3Address destIp = inet::L3Address(), int destPort = -1);
@@ -7985,10 +7991,10 @@ index 0000000..aeb7d4a
 +}
 diff --git a/src-inet4/soa4core/manager/base/Manager.cc b/src-inet4/soa4core/manager/base/Manager.cc
 new file mode 100644
-index 0000000..3b72af5
+index 0000000..f50d11b
 --- /dev/null
 +++ b/src-inet4/soa4core/manager/base/Manager.cc
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,279 @@
 + //
 +// c Timo Haeckel for HAW Hamburg
 +//
@@ -8021,6 +8027,24 @@ index 0000000..3b72af5
 +using namespace inet;
 +
 +namespace SOA4CoRE {
++
++namespace {
++
++// INET4 port: a subscriber connector serves exactly one (service, QoS group, requested instance)
++// combination, so applications requesting different instances never share notifications.
++bool connectorMatches(SubscriberConnector* subscriberConnector, QoSGroup qosGroup, uint16_t instanceId) {
++    std::vector<ServiceBase*> subscriberApplications = subscriberConnector->getApplications();
++    if (subscriberApplications.empty()) {
++        throw cRuntimeError("Found empty subscriber connector without subscriber applications.");
++    }
++    Subscriber* subscriberApplication = nullptr;
++    if (!(subscriberApplication = dynamic_cast<Subscriber*>(subscriberApplications[0]))) {
++        throw cRuntimeError("The subscriber application must be of the type Subscriber.");
++    }
++    return subscriberApplication->getQoSGroup() == qosGroup && subscriberApplication->getInstanceId() == instanceId;
++}
++
++} // namespace
 +
 +void Manager::initialize(int stage) {
 +
@@ -8095,25 +8119,11 @@ index 0000000..3b72af5
 +{
 +    Enter_Method("LSM:registerSubscriberService()");
 +    Subscriber* subscriberApplication_ = nullptr;
-+    SubscriberConnector* validSubscriberConnector = nullptr;
 +    if(!(subscriberApplication_ = dynamic_cast<Subscriber*>(subscriberApplication))){
 +        throw cRuntimeError("Given subscriber application must be of type Subscriber");
 +    }
-+    std::list<SubscriberConnector*> subscriberConnectors = _lsr->getSubscriberConnectors(publisherServiceIdentifier.getServiceId());
-+    for (SubscriberConnector* subscriberConnector : subscriberConnectors) {
-+        std::vector<ServiceBase*> subscriberApplications = subscriberConnector->getApplications();
-+        Subscriber* connectedSubscriberApplication = nullptr;
-+        if (subscriberApplications.empty()) {
-+            throw cRuntimeError("Empty subscriber connector without applications!");
-+        }
-+        if (!(connectedSubscriberApplication = dynamic_cast<Subscriber*>(subscriberApplications[0]))) {
-+            throw cRuntimeError("The subscriber application must be of type Subscriber");
-+        }
-+        if (connectedSubscriberApplication->getQoSGroup() == subscriberApplication_->getQoSGroup()) {
-+            validSubscriberConnector = subscriberConnector;
-+            break;
-+        }
-+    }
++    SubscriberConnector* validSubscriberConnector = findSubscriberConnector(publisherServiceIdentifier.getServiceId(),
++            subscriberApplication_->getQoSGroup(), publisherServiceIdentifier.getInstanceId());
 +
 +    if (!validSubscriberConnector) {
 +        validSubscriberConnector = createSubscriberConnector(subscriberApplication_);
@@ -8207,13 +8217,13 @@ index 0000000..3b72af5
 +}
 +
 +SubscriberEndpointBase* Manager::createOrFindSubscriberEndpoint(
-+        uint32_t publisherServiceId, ConnectionSpecificInformation* csi) {
++        uint32_t publisherServiceId, uint16_t instanceId, ConnectionSpecificInformation* csi) {
 +    SubscriberEndpointBase* sub = nullptr;
 +    QoSGroup qosGroup = getQoSGroupForConnectionType(ConnectionType(csi->getConnectionType()));
-+    sub = findSubscriberEndpoint(publisherServiceId, qosGroup);
++    sub = findSubscriberEndpoint(publisherServiceId, qosGroup, instanceId);
 +    if(!sub){
 +        SubscriberConnector* subscriberConnector = findSubscriberConnector(
-+                publisherServiceId, qosGroup);
++                publisherServiceId, qosGroup, instanceId);
 +        if(subscriberConnector){
 +            sub = createConnectionSpecificSubscriberEndpoint(csi, subscriberConnector);
 +            sub->finalizeParameters();
@@ -8248,61 +8258,28 @@ index 0000000..3b72af5
 +}
 +
 +SubscriberEndpointBase* Manager::findSubscriberEndpoint(
-+        uint32_t publisherServiceId, QoSGroup qosGroup) {
-+
-+    SubscriberEndpointBase* subscriberEndpoint = nullptr;
-+    // find fitting subscriber connector
-+    std::list<SubscriberConnector*> subscriberConnectors = _lsr->getSubscriberConnectors(publisherServiceId);
-+    for (SubscriberConnector* subscriberConnector : subscriberConnectors) {
-+        std::vector<ServiceBase*> subscriberApplications = subscriberConnector->getApplications();
-+        if (subscriberApplications.empty()) {
-+            throw cRuntimeError("Found empty subscriber connector without subscriber applications.");
-+        }
-+        Subscriber* subscriberApplication = nullptr;
-+        if (!(subscriberApplication = dynamic_cast<Subscriber*>(subscriberApplications[0]))) {
-+            throw cRuntimeError("The subscriber application must be of the type Subscriber.");
-+        }
-+
-+        if (subscriberApplication->getQoSGroup() == qosGroup && (subscriberEndpoint = subscriberConnector->getEndpoint())) {
-+            break;
-+        }
-+    }
-+    return subscriberEndpoint;
++        uint32_t publisherServiceId, QoSGroup qosGroup, uint16_t instanceId) {
++    SubscriberConnector* subscriberConnector = findSubscriberConnector(publisherServiceId, qosGroup, instanceId);
++    return subscriberConnector ? subscriberConnector->getEndpoint() : nullptr;
 +}
 +
 +SubscriberConnector* Manager::findSubscriberConnector(uint32_t publisherServiceId,
-+        QoSGroup qosGroup) {
-+    SubscriberConnector* subscriberConnector = nullptr;
-+    std::list<SubscriberConnector*> subscriberConnectors =
-+            _lsr->getSubscriberConnectors(publisherServiceId);
-+    for (SubscriberConnector* subscriberConnector_ : subscriberConnectors) {
-+        std::vector<ServiceBase*> subscriberApplications =
-+                subscriberConnector_->getApplications();
-+        if (subscriberApplications.empty()) {
-+            throw cRuntimeError(
-+                    "Found empty subscriber connector without subscriber applications.");
-+        }
-+        Subscriber* subscriberApplication = nullptr;
-+        if (!(subscriberApplication =
-+                dynamic_cast<Subscriber*>(subscriberApplications[0]))) {
-+            throw cRuntimeError(
-+                    "The subscriber application must be of the type Subscriber.");
-+        }
-+        if (subscriberApplication->getQoSGroup() == qosGroup) {
-+            subscriberConnector = subscriberConnector_;
-+            break;
++        QoSGroup qosGroup, uint16_t instanceId) {
++    for (SubscriberConnector* subscriberConnector : _lsr->getSubscriberConnectors(publisherServiceId)) {
++        if (connectorMatches(subscriberConnector, qosGroup, instanceId)) {
++            return subscriberConnector;
 +        }
 +    }
-+    return subscriberConnector;
++    return nullptr;
 +}
 +
 +} /* end namespace  */
 diff --git a/src-inet4/soa4core/manager/base/Manager.h b/src-inet4/soa4core/manager/base/Manager.h
 new file mode 100644
-index 0000000..d2260c2
+index 0000000..ec055db
 --- /dev/null
 +++ b/src-inet4/soa4core/manager/base/Manager.h
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,273 @@
 +//
 +// c Timo Haeckel for HAW Hamburg
 +//
@@ -8423,10 +8400,11 @@ index 0000000..d2260c2
 +     * The connector will be connected as well.
 +     *
 +     * @param publisherServiceId    the service id of the publisher.
++     * @param instanceId            the instance id requested by the subscriber (0xFFFF for any).
 +     * @param csi                   the CSI of the publisher.
 +     * @return                      the corresponding subscriber endpoint, else nullptr.
 +     */
-+    SubscriberEndpointBase* createOrFindSubscriberEndpoint(uint32_t publisherServiceId, ConnectionSpecificInformation* csi);
++    SubscriberEndpointBase* createOrFindSubscriberEndpoint(uint32_t publisherServiceId, uint16_t instanceId, ConnectionSpecificInformation* csi);
 +
 +    /**
 +     * @brief Searches for a publisher endpoint on this node for the given service id and QoS.
@@ -8438,22 +8416,24 @@ index 0000000..d2260c2
 +    PublisherEndpointBase* findPublisherEndpoint(uint32_t publisherServiceId, QoSGroup qosGroup);
 +
 +    /**
-+     * @brief Searches for a subscriber endpoint on this node for the given service id and QoS.
++     * @brief Searches for a subscriber endpoint on this node for the given service id, QoS and requested instance.
 +     *
 +     * @param publisherServiceId     the service id of the publisher.
 +     * @param qosGroup               the QoS group of the publisher.
++     * @param instanceId             the instance id requested by the subscriber (0xFFFF for any).
 +     * @return                       the subscriber endpoint if found, else nullptr.
 +     */
-+    SubscriberEndpointBase* findSubscriberEndpoint(uint32_t publisherServiceId, QoSGroup qosGroup);
++    SubscriberEndpointBase* findSubscriberEndpoint(uint32_t publisherServiceId, QoSGroup qosGroup, uint16_t instanceId);
 +
 +    /**
-+     * @brief Searches for a subscriber connector on this node for the given service id and QoS.
++     * @brief Searches for a subscriber connector on this node for the given service id, QoS and requested instance.
 +     *
 +     * @param publisherServiceId     the service id of the publisher.
 +     * @param qosGroup               the QoS group of the publisher.
++     * @param instanceId             the instance id requested by the subscriber (0xFFFF for any).
 +     * @return                       the subscriber connector if found, else nullptr.
 +     */
-+    SubscriberConnector* findSubscriberConnector(uint32_t publisherServiceId, QoSGroup qosGroup);
++    SubscriberConnector* findSubscriberConnector(uint32_t publisherServiceId, QoSGroup qosGroup, uint16_t instanceId);
 +
 +    /**
 +     * @brief Initiates a service discovery for the given service
@@ -8621,10 +8601,10 @@ index 0000000..cc05f17
 +}
 diff --git a/src-inet4/soa4core/manager/someip/SomeIpManager.cc b/src-inet4/soa4core/manager/someip/SomeIpManager.cc
 new file mode 100644
-index 0000000..81d2de9
+index 0000000..812a5d3
 --- /dev/null
 +++ b/src-inet4/soa4core/manager/someip/SomeIpManager.cc
-@@ -0,0 +1,827 @@
+@@ -0,0 +1,818 @@
 +//
 +// This program is free software: you can redistribute it and/or modify
 +// it under the terms of the GNU Lesser General Public License as published by
@@ -8819,7 +8799,7 @@ index 0000000..81d2de9
 +                    if(subState->requested) {
 +                        if(!subState->active) {
 +                            // this is a new established subscription, and no cyclic refresh
-+                            createSubscriberEndpoint(someIpDiscoveryNotification, qosGroup);
++                            createSubscriberEndpoint(someIpDiscoveryNotification, qosGroup, instanceId);
 +                            subState->active = true;
 +                        }
 +                        subState->requested = false;
@@ -8831,7 +8811,7 @@ index 0000000..81d2de9
 +                    if(subState->requested) {
 +                        if(!subState->active) {
 +                            // this is a new established subscription, and no cyclic refresh
-+                            createSubscriberEndpoint(someIpDiscoveryNotification, qosGroup);
++                            createSubscriberEndpoint(someIpDiscoveryNotification, qosGroup, 0xFFFF);
 +                            subState->active = true;
 +                        }
 +                        subState->requested = false;
@@ -8928,7 +8908,7 @@ index 0000000..81d2de9
 +        csi->setPort(subscriberApplication_->getUdpPort());
 +        csi->setDestAddress(subscriberApplication_->getMcastDestAddr().c_str());
 +        csi->setDestPort(subscriberApplication_->getMcastDestPort());
-+        SubscriberEndpointBase* sub = createOrFindSubscriberEndpoint(serviceId, csi);
++        SubscriberEndpointBase* sub = createOrFindSubscriberEndpoint(serviceId, instanceId, csi);
 +        if(!sub) {
 +            throw cRuntimeError("No subscriber was created...");
 +        }
@@ -8939,7 +8919,7 @@ index 0000000..81d2de9
 +        if(_subscriptions[serviceId].count(qosGroup)) {
 +            if(_subscriptions[serviceId][qosGroup].count(instanceId)) {
 +                throw cRuntimeError("Sepecific instance already requested, this should never happen!");
-+            } else if(_subscriptions[serviceId][qosGroup].count(0xFFFF)) {
++            } else if(_subscriptions[serviceId][qosGroup].count(0xFFFF) || instanceId == 0xFFFF) {
 +                throw cRuntimeError("Currently we cannot handle any simultaneous any subscriptions and specific subs");
 +            }
 +        } else {
@@ -9206,28 +9186,19 @@ index 0000000..81d2de9
 +                    subscription = _subscriptions[serviceId][qosGroup][0xFFFF];
 +                }
 +                if(subscription != nullptr && !subscription->requested) {
-+                    list<SubscriberConnector*> subscriberConnectors = _lsr->getSubscriberConnectors(someIpdiscoveryNotificationOffer->getServiceId());
-+                    for (SubscriberConnector* subscriberConnector: subscriberConnectors) {
-+                        vector<ServiceBase*> subscriberApplications = subscriberConnector->getApplications();
-+                        if (subscriberApplications.empty()) {
-+                            throw cRuntimeError("Empty subscriber connector without applications!.");
-+                        }
-+                        Subscriber* subscriberApplication = nullptr;
-+                        if (!(subscriberApplication = dynamic_cast<Subscriber*>(subscriberApplications[0]))) {
-+                            throw cRuntimeError("The subscriber application must be of the type Subscriber.");
-+                        }
-+                        if (subscriberApplication->getQoSGroup() == qosGroup) {
-+                            SomeIpDiscoveryNotification* someIpdiscoveryNotificationSubscription = new SomeIpDiscoveryNotification(serviceId,
-+                                    someIpdiscoveryNotificationOffer->getAddress(), instanceId, set<QoSGroup>{}, qosGroup, subscriberConnector->getTcpPort(),
-+                                    subscriberConnector->getUdpPort(), someIpdiscoveryNotificationOffer->getMcastDestAddr(), someIpdiscoveryNotificationOffer->getMcastDestPort()
-+                            );
-+                            someIpdiscoveryNotificationSubscription->setDeadline(subscriberApplication->getDeadline());
-+                            someIpdiscoveryNotificationSubscription->setEventgroupId(subscriberApplication->getEventgroupId());
-+                            subscription->serviceOfferReceivedAndRequested();
-+                            emit(_subscribeSignal, someIpdiscoveryNotificationSubscription);
-+                            // Break here because there can be only one connector for a service ID and QoS Group pair
-+                            break;
-+                        }
++                    // Only the connector of the requested instance (specific or any) receives this offer
++                    SubscriberConnector* subscriberConnector = findSubscriberConnector(serviceId, qosGroup,
++                            subscription->publisherIdentifier.getInstanceId());
++                    if (subscriberConnector) {
++                        Subscriber* subscriberApplication = dynamic_cast<Subscriber*>(subscriberConnector->getApplications()[0]);
++                        SomeIpDiscoveryNotification* someIpdiscoveryNotificationSubscription = new SomeIpDiscoveryNotification(serviceId,
++                                someIpdiscoveryNotificationOffer->getAddress(), instanceId, set<QoSGroup>{}, qosGroup, subscriberConnector->getTcpPort(),
++                                subscriberConnector->getUdpPort(), someIpdiscoveryNotificationOffer->getMcastDestAddr(), someIpdiscoveryNotificationOffer->getMcastDestPort()
++                        );
++                        someIpdiscoveryNotificationSubscription->setDeadline(subscriberApplication->getDeadline());
++                        someIpdiscoveryNotificationSubscription->setEventgroupId(subscriberApplication->getEventgroupId());
++                        subscription->serviceOfferReceivedAndRequested();
++                        emit(_subscribeSignal, someIpdiscoveryNotificationSubscription);
 +                    }
 +                }
 +            }
@@ -9317,7 +9288,7 @@ index 0000000..81d2de9
 +}
 +
 +// Subscriber-side
-+void SomeIpManager::createSubscriberEndpoint(SomeIpDiscoveryNotification* someIpDiscoveryNotification, QoSGroup qosGroup) {
++void SomeIpManager::createSubscriberEndpoint(SomeIpDiscoveryNotification* someIpDiscoveryNotification, QoSGroup qosGroup, uint16_t requestedInstanceId) {
 +    ConnectionSpecificInformation* csi;
 +    switch (qosGroup) {
 +        case QoSGroup::SOMEIP_TCP: {
@@ -9348,7 +9319,7 @@ index 0000000..81d2de9
 +            throw cRuntimeError("Unknown QoS group.");
 +    }
 +
-+    SubscriberEndpointBase* sub = createOrFindSubscriberEndpoint(someIpDiscoveryNotification->getServiceId(), csi);
++    SubscriberEndpointBase* sub = createOrFindSubscriberEndpoint(someIpDiscoveryNotification->getServiceId(), requestedInstanceId, csi);
 +    if(!sub) {
 +        throw cRuntimeError("No subscriber was created...");
 +    }
@@ -9454,10 +9425,10 @@ index 0000000..81d2de9
 +} /* end namespace SOA4CoRE */
 diff --git a/src-inet4/soa4core/manager/someip/SomeIpManager.h b/src-inet4/soa4core/manager/someip/SomeIpManager.h
 new file mode 100644
-index 0000000..d3cf9a8
+index 0000000..42a9fea
 --- /dev/null
 +++ b/src-inet4/soa4core/manager/someip/SomeIpManager.h
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,349 @@
 +//
 +// This program is free software: you can redistribute it and/or modify
 +// it under the terms of the GNU Lesser General Public License as published by
@@ -9716,8 +9687,9 @@ index 0000000..d3cf9a8
 +     * Creates a subscriber endpoint for a service
 +     * @param someIpDiscoveryNotification the SOME/IP discovery notification containing the publisher's information
 +     * @param qosGroup the QoS group
++     * @param requestedInstanceId the instance id the subscription was requested for (0xFFFF for any)
 +     */
-+    void createSubscriberEndpoint(SomeIpDiscoveryNotification* someIpDiscoveryNotification, QoSGroup qosGroup);
++    void createSubscriberEndpoint(SomeIpDiscoveryNotification* someIpDiscoveryNotification, QoSGroup qosGroup, uint16_t requestedInstanceId);
 +
 +    /**
 +     * Returns the corresponding L4 protocol of the QoS group
@@ -10457,10 +10429,10 @@ index 0000000..65cb52d
 +#endif
 diff --git a/src-inet4/soa4core/messages/someip/SomeIpSerializer.cc b/src-inet4/soa4core/messages/someip/SomeIpSerializer.cc
 new file mode 100644
-index 0000000..6198699
+index 0000000..efdf05c
 --- /dev/null
 +++ b/src-inet4/soa4core/messages/someip/SomeIpSerializer.cc
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,218 @@
 +//
 +// This program is free software: you can redistribute it and/or modify
 +// it under the terms of the GNU Lesser General Public License as published by
@@ -10669,7 +10641,8 @@ index 0000000..6198699
 +        header->setOptionsArraySize(options.size());
 +        for (size_t i = 0; i < options.size(); ++i)
 +            header->setOptions(i, options[i]);
-+        finalizeSomeIpSd(*header);
++        // Keep the received length field; the chunk length is set from the consumed bytes so that
++        // receivers can detect a length field that disagrees with the parsed structure.
 +        return header;
 +    }
 +};
@@ -11428,10 +11401,10 @@ index 0000000..db4ffcb
 +#endif /* SOA4CORE_SERVICEIDENTIFIER_SERVICEIDENTIFIER_H_ */
 diff --git a/src-inet4/soa4core/test/someip/SomeIpCodecSelfTest.cc b/src-inet4/soa4core/test/someip/SomeIpCodecSelfTest.cc
 new file mode 100644
-index 0000000..9dde14b
+index 0000000..2801285
 --- /dev/null
 +++ b/src-inet4/soa4core/test/someip/SomeIpCodecSelfTest.cc
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,275 @@
 +//
 +// This program is free software: you can redistribute it and/or modify
 +// it under the terms of the GNU Lesser General Public License as published by
@@ -11638,6 +11611,14 @@ index 0000000..9dde14b
 +                && subscribe->getEntries(0).getEventgroupId() == 1 && subscribe->getEntries(0).getTtl() == 3
 +                && subscribe->getEntries(0).getCounter() == 0 && subscribe->getOptions(0).getL4Protocol() == 0x06
 +                && subscribe->getOptions(0).getPort() == 3172);
++        check("decode-sd-length-field", subscribe->getLength() == 0x30 && subscribe->getChunkLength() == B(goldenSubscribe().size()));
++
++        // A length field that disagrees with the parsed structure must survive decoding so the receiver can reject it.
++        Bytes wrongLength = goldenSubscribe();
++        wrongLength[7] = 0x34;
++        auto mismatched = deserializeSd(wrongLength);
++        check("decode-sd-keeps-received-length", mismatched->getLength() == 0x34
++                && mismatched->getChunkLength() == B(goldenSubscribe().size()));
 +
 +        auto nack = deserializeSd(goldenNackWithCounter());
 +        check("decode-sd-nack-counter", nack->isCorrect() && nack->getSessionId() == 0xfffe && nack->getEntries(0).getType() == SUBSCRIBEVENTGROUPACK
@@ -11721,6 +11702,138 @@ index 0000000..797a551
 +{
 +    parameters:
 +        @class(SOA4CoRE::SomeIpCodecSelfTest);
++}
+diff --git a/src-inet4/soa4core/test/someip/SomeIpSdInjector.cc b/src-inet4/soa4core/test/someip/SomeIpSdInjector.cc
+new file mode 100644
+index 0000000..db0a8dc
+--- /dev/null
++++ b/src-inet4/soa4core/test/someip/SomeIpSdInjector.cc
+@@ -0,0 +1,86 @@
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// INET4 port, test only: injects a SOME/IP-SD message that uses the second option run.
++//
++#include "inet/common/packet/Packet.h"
++#include "inet/networklayer/common/IpProtocolId_m.h"
++#include "inet/networklayer/common/L3AddressResolver.h"
++#include "inet/transportlayer/contract/udp/UdpSocket.h"
++#include "soa4core/messages/someip/SomeIpSd.h"
++
++using namespace omnetpp;
++using namespace inet;
++
++namespace SOA4CoRE {
++
++class SomeIpSdInjector : public cSimpleModule
++{
++    UdpSocket socket;
++    cMessage *timer = nullptr;
++
++    static SomeIpSDEntry offerEntry(uint16_t serviceId, uint16_t instanceId)
++    {
++        SomeIpSDEntry entry;
++        entry.setType(OFFER);
++        entry.setServiceId(serviceId);
++        entry.setInstanceId(instanceId);
++        entry.setMajorVersion(0xff);
++        entry.setTtl(0xffffff);
++        entry.setMinorVersion(0xffffffff);
++        return entry;
++    }
++
++  protected:
++    virtual int numInitStages() const override { return NUM_INIT_STAGES; }
++
++    virtual void initialize(int stage) override
++    {
++        if (stage == INITSTAGE_APPLICATION_LAYER) {
++            socket.setOutputGate(gate("socketOut"));
++            socket.bind(par("localPort").intValue());
++            timer = new cMessage("inject");
++            scheduleAt(par("sendTime"), timer);
++        }
++    }
++
++    virtual void handleMessage(cMessage *message) override
++    {
++        if (message != timer) {
++            delete message;
++            return;
++        }
++        const uint16_t serviceId = par("serviceId").intValue();
++        auto header = makeShared<SomeIpSDHeader>();
++        header->setSessionId(1);
++        header->appendOptions(makeConfigurationOption({{"soa4core.test", "second-run"}}));
++        header->appendOptions(makeIpv4Option(IPV4ENDPOINT, L3AddressResolver().resolve(par("endpointAddress")).toIpv4(),
++                IP_PROT_UDP, par("endpointPort").intValue()));
++
++        SomeIpSDEntry valid = offerEntry(serviceId, par("instanceId").intValue());
++        valid.setIndex1stOptions(0);
++        valid.setNum1stOptions(1);
++        valid.setIndex2ndOptions(1);
++        valid.setNum2ndOptions(1);
++        header->appendEntries(valid);
++
++        SomeIpSDEntry outOfRange = offerEntry(serviceId + 1, par("instanceId").intValue());
++        outOfRange.setIndex2ndOptions(header->getOptionsArraySize());
++        outOfRange.setNum2ndOptions(1);
++        header->appendEntries(outOfRange);
++
++        finalizeSomeIpSd(*header);
++        auto packet = new Packet("SOME/IP SD - injected OFFER", header);
++        socket.sendTo(packet, L3AddressResolver().resolve(par("destAddress")), par("destPort").intValue());
++    }
++
++  public:
++    virtual ~SomeIpSdInjector() { cancelAndDelete(timer); }
++};
++
++Define_Module(SomeIpSdInjector);
++
++} // namespace SOA4CoRE
+diff --git a/src-inet4/soa4core/test/someip/SomeIpSdInjector.ned b/src-inet4/soa4core/test/someip/SomeIpSdInjector.ned
+new file mode 100644
+index 0000000..af6ba0d
+--- /dev/null
++++ b/src-inet4/soa4core/test/someip/SomeIpSdInjector.ned
+@@ -0,0 +1,34 @@
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Lesser General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++package soa4core.test.someip;
++
++import inet.applications.contract.IApp;
++
++//
++// INET4 port, test only: sends one hand-built SOME/IP-SD message to a peer's SD
++// socket. Entry 0 offers service "serviceId" with a configuration option in the
++// first option run and the IPv4 endpoint (endpointAddress:endpointPort, UDP) in
++// the second run. Entry 1 offers service "serviceId"+1 with a second run that
++// points past the option array (an invalid option reference).
++//
++simple SomeIpSdInjector like IApp
++{
++    parameters:
++        string destAddress;
++        int destPort = default(30490);
++        int localPort = default(30491);
++        double sendTime @unit(s) = default(0.5s);
++        int serviceId;
++        int instanceId = default(1);
++        string endpointAddress;
++        int endpointPort;
++        @class(SOA4CoRE::SomeIpSdInjector);
++        @display("i=block/source");
++    gates:
++        input socketIn;
++        output socketOut;
 +}
 diff --git a/src-inet4/soa4core/utility/comfortFunctions.cc b/src-inet4/soa4core/utility/comfortFunctions.cc
 new file mode 100644
