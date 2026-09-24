@@ -87,3 +87,17 @@ TSN構成のpcapでは、全AVTPフレームに802.1Qタグ（PCP 3、VID 2、�
 | SomeIpUdpMcast | マルチキャスト 48件 | 21.6us | マルチキャスト 48件 | 21.6us |
 
 既存の試験（CAN単体15項目、混在4構成、AVTP）も、SOA4CoRE追加後に再実行してすべて成功しました。
+
+## AUTOSAR E2E / SecOC（2026-09-24）
+
+`python3 tests/test_protection.py` がすべて成功しました（結果: `results/protection/report.json`）。詳細は [PROTECTION.md](PROTECTION.md) を参照してください。
+
+- 自己試験119項目（CRC、E2E P01/P02/P04/P05/P07の既知解、状態機械、RFC 4493 CMAC、SecOC）。
+- 設定の拒否（2026-09-25追加）: 負の `e2eOffset`・`e2eMaxDeltaCounter`、受理ウィンドウなしの `secocFreshnessTxBits=0` は、明示的なエラーで停止します。修正前の実装では、負のオフセットが巨大な符号なし値に変換され（CANでは範囲外書き込み）、FV 0ビットは1件の欠落で以後すべて認証失敗になっていました。
+- 参照実装照合: E2E 260件（autosar-e2e 1.0.0）、SecOC 60件（pycryptodome 3.23.0）がバイト一致。
+- CAN 6構成（独自トンネル、IEEE 1722 NTSCF/TSCF、故障注入3構成）、SOME/IP 4構成（TCP、UDP、UDPマルチキャスト、故障注入、鍵違い）。AVTPとSOME/IPはpcapの全PDUを参照実装で検証。
+- 変異試験5件（P05のCRCバイト順、MACの切り詰め位置、DataIdのバイト順、P01の最終XOR、P07のCRC範囲）をすべて検出。
+- 既存の `make test`（CAN単体15項目、混在4構成、AVTP、SOME/IP）も変更後に全て成功。
+- パッチを固定コミットの未改修cloneに適用し、別ディレクトリでFiCo4OMNeT・CoRE4INET・AUTOSAR保護ライブラリ・SignalsAndGateways・SOA4CoREをビルドして `tests/test_protection.py` が成功（INETは既存のビルドを共有、試験用venvは新規作成）。
+
+環境: OpenSSL 3.0.13（Ubuntu 24.04のlibssl3。開発ヘッダは `scripts/fetch-openssl-dev.sh` で `.local/` に展開）。

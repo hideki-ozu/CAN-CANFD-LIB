@@ -11,3 +11,7 @@
 /.claude/
 /.env
 /.env.*
+# AUTOSAR protection library build products (generated Makefile, objects, .so)
+/autosar/src/Makefile
+/autosar/src/out/
+/autosar/src/*.so
